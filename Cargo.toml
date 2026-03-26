@@ -1,0 +1,14 @@
+[package]
+name = "cdc"
+version = "0.1.0"
+edition = "2024"
+description = "Multi-session Claude Code orchestrator TUI"
+
+[dependencies]
+ratatui = "0.29"
+crossterm = "0.28"
+portable-pty = "0.8"
+vte = "0.13"
+crossbeam-channel = "0.5"
+clap = { version = "4", features = ["derive"] }
+unicode-width = "0.1"
