@@ -1,3 +1,4 @@
+use crate::app::TextSelection;
 use crate::pane::grid::Cell;
 use crate::pane::TerminalGrid;
 use ratatui::buffer::Buffer;
@@ -8,11 +9,29 @@ use unicode_width::UnicodeWidthChar;
 
 pub struct PaneWidget<'a> {
     grid: &'a TerminalGrid,
+    selection: Option<&'a TextSelection>,
 }
 
 impl<'a> PaneWidget<'a> {
-    pub fn new(grid: &'a TerminalGrid, _focused: bool) -> Self {
-        Self { grid }
+    pub fn new(grid: &'a TerminalGrid, _focused: bool, selection: Option<&'a TextSelection>) -> Self {
+        Self { grid, selection }
+    }
+
+    fn is_selected(&self, row: u16, col: u16) -> bool {
+        let Some(sel) = self.selection else { return false };
+        if !sel.active { return false; }
+        let (sc, sr, ec, er) = sel.normalized();
+        if row < sr || row > er { return false; }
+        if sr == er {
+            // Single line selection
+            col >= sc && col <= ec
+        } else if row == sr {
+            col >= sc
+        } else if row == er {
+            col <= ec
+        } else {
+            true // Middle rows fully selected
+        }
     }
 }
 
@@ -50,8 +69,22 @@ impl<'a> Widget for PaneWidget<'a> {
                         }
 
                         buf_cell.set_char(cell.ch);
-                        buf_cell.fg = cell.fg;
-                        buf_cell.bg = cell.bg;
+                        if self.is_selected(row, col) {
+                            // Invert colors for selection highlight
+                            buf_cell.bg = if cell.fg == ratatui::style::Color::Reset {
+                                ratatui::style::Color::White
+                            } else {
+                                cell.fg
+                            };
+                            buf_cell.fg = if cell.bg == ratatui::style::Color::Reset {
+                                ratatui::style::Color::Black
+                            } else {
+                                cell.bg
+                            };
+                        } else {
+                            buf_cell.fg = cell.fg;
+                            buf_cell.bg = cell.bg;
+                        }
                         let mut m = Modifier::empty();
                         if cell.bold { m |= Modifier::BOLD; }
                         if cell.italic { m |= Modifier::ITALIC; }

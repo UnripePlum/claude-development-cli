@@ -2,7 +2,7 @@ pub mod pane_widget;
 
 pub use pane_widget::PaneWidget;
 
-use crate::app::Dialog;
+use crate::app::{Dialog, TextSelection};
 use crate::pane::{Pane, PaneStatus};
 use crate::voice::VoiceState;
 use ratatui::layout::Rect;
@@ -79,6 +79,7 @@ pub fn render(
     frame_count: u64,
     voice_state: &VoiceState,
     correcting: bool,
+    selection: &TextSelection,
 ) -> Vec<(ActivePane, Rect)> {
     // Fullscreen mode: render only the focused pane at full area
     if let Some(fs) = fullscreen {
@@ -86,11 +87,13 @@ pub fn render(
         match fs {
             ActivePane::Orchestrator => {
                 let title = voice_title("Orchestrator [fullscreen]", voice_state, correcting);
-                render_pane(frame, orchestrator, area, true, &title, frame_count);
+                let sel = if selection.active && selection.pane == ActivePane::Orchestrator { Some(selection) } else { None };
+                render_pane(frame, orchestrator, area, true, &title, frame_count, sel);
                 set_cursor_for_ime(frame, orchestrator, area);
             }
             ActivePane::Worker(idx) => {
                 if let Some(pane) = worker_panes.get(idx) {
+                    let sel = if selection.active && selection.pane == ActivePane::Worker(idx) { Some(selection) } else { None };
                     render_pane(
                         frame,
                         pane,
@@ -98,6 +101,7 @@ pub fn render(
                         true,
                         &format!("Worker {} [fullscreen]", idx + 1),
                         frame_count,
+                        sel,
                     );
                     set_cursor_for_ime(frame, pane, area);
                 }
@@ -113,12 +117,14 @@ pub fn render(
     for (i, pane) in worker_panes.iter().enumerate() {
         let rect = layout.worker_rects[i];
         let focused = *active == ActivePane::Worker(i);
-        render_pane(frame, pane, rect, focused, &format!("Worker {}", i + 1), frame_count);
+        let sel = if selection.active && selection.pane == ActivePane::Worker(i) { Some(selection) } else { None };
+        render_pane(frame, pane, rect, focused, &format!("Worker {}", i + 1), frame_count, sel);
         rects.push((ActivePane::Worker(i), rect));
     }
 
     let orch_focused = *active == ActivePane::Orchestrator;
     let orch_title = voice_title("Orchestrator", voice_state, correcting);
+    let orch_sel = if selection.active && selection.pane == ActivePane::Orchestrator { Some(selection) } else { None };
     render_pane(
         frame,
         orchestrator,
@@ -126,6 +132,7 @@ pub fn render(
         orch_focused,
         &orch_title,
         frame_count,
+        orch_sel,
     );
     rects.push((ActivePane::Orchestrator, layout.orch_rect));
 
@@ -245,7 +252,7 @@ enum PaneAlert {
     ReceivingPrompt, // for SendToWorker yellow blink
 }
 
-fn render_pane(frame: &mut Frame, pane: &Pane, area: Rect, focused: bool, title: &str, frame_count: u64) {
+fn render_pane(frame: &mut Frame, pane: &Pane, area: Rect, focused: bool, title: &str, frame_count: u64, selection: Option<&TextSelection>) {
     let alert = detect_pane_alert(pane);
     let blink_on = (frame_count / 15) % 2 == 0; // ~0.5s blink at 60fps
 
@@ -283,7 +290,7 @@ fn render_pane(frame: &mut Frame, pane: &Pane, area: Rect, focused: bool, title:
 
     let inner = block.inner(area);
     frame.render_widget(block, area);
-    frame.render_widget(PaneWidget::new(&pane.grid, focused), inner);
+    frame.render_widget(PaneWidget::new(&pane.grid, focused, selection), inner);
 }
 
 /// Render a confirmation/input dialog overlay.

@@ -15,6 +15,32 @@ use ratatui::layout::Rect;
 use ratatui::Terminal;
 use std::time::{Duration, Instant};
 
+/// Text selection state for mouse drag.
+#[derive(Clone)]
+pub struct TextSelection {
+    pub pane: ActivePane,
+    pub start_col: u16,
+    pub start_row: u16,
+    pub end_col: u16,
+    pub end_row: u16,
+    pub active: bool,
+}
+
+impl TextSelection {
+    fn none() -> Self {
+        Self { pane: ActivePane::Orchestrator, start_col: 0, start_row: 0, end_col: 0, end_row: 0, active: false }
+    }
+
+    /// Get normalized (top-left, bottom-right) range.
+    pub fn normalized(&self) -> (u16, u16, u16, u16) {
+        if self.start_row < self.end_row || (self.start_row == self.end_row && self.start_col <= self.end_col) {
+            (self.start_col, self.start_row, self.end_col, self.end_row)
+        } else {
+            (self.end_col, self.end_row, self.start_col, self.start_row)
+        }
+    }
+}
+
 /// Voice correction state machine.
 enum CorrectionState {
     Idle,
@@ -194,6 +220,8 @@ pub fn run(restore_session: Option<crate::session::Session>) -> Result<(), Box<d
     let mut fullscreen: Option<ActivePane> = None;
     let mut cwd_input: Option<String> = None; // Some = entering cwd for new worker
     let mut cwd_suggestions: Vec<String> = Vec::new();
+    let mut cwd_suggestion_idx: usize = 0;
+    let mut selection = TextSelection::none();
     let mut dialog = Dialog::None;
     let mut frame_count: u64 = 0;
     let mut _loop_start = Instant::now();
@@ -289,8 +317,9 @@ pub fn run(restore_session: Option<crate::session::Session>) -> Result<(), Box<d
             let fc = frame_count;
             let vs = &voice_state;
             let correcting = matches!(correction_state, CorrectionState::WaitingForResponse { .. });
+            let sel_ref = &selection;
             terminal.draw(|frame| {
-                *rects_out = ui::render(frame, &orchestrator.pane, &worker_panes, &active_copy, fullscreen, fc, vs, correcting);
+                *rects_out = ui::render(frame, &orchestrator.pane, &worker_panes, &active_copy, fullscreen, fc, vs, correcting, sel_ref);
                 if let Some(input) = cwd_ref {
                     ui::render_cwd_input(frame, input, sugg_ref);
                 }
@@ -427,6 +456,7 @@ pub fn run(restore_session: Option<crate::session::Session>) -> Result<(), Box<d
                                     };
                                     cwd_input = None;
                                     cwd_suggestions.clear();
+                                    cwd_suggestion_idx = 0;
                                     // Create worker with the entered cwd
                                     let new_count = workers.len() + 1;
                                     let layout =
@@ -463,29 +493,45 @@ pub fn run(restore_session: Option<crate::session::Session>) -> Result<(), Box<d
                                 KeyCode::Esc => {
                                     cwd_input = None;
                                     cwd_suggestions.clear();
+                                    cwd_suggestion_idx = 0;
                                 }
                                 KeyCode::Tab => {
-                                    let matches = smart_complete(input);
-                                    if matches.len() == 1 {
-                                        *input = matches[0].clone();
-                                        cwd_suggestions.clear();
-                                    } else if matches.len() > 1 {
-                                        let common = common_prefix(&matches);
-                                        if common.len() > input.len() {
-                                            *input = common;
-                                        }
-                                        cwd_suggestions = matches;
+                                    if !cwd_suggestions.is_empty() {
+                                        // Cycle to next suggestion
+                                        cwd_suggestion_idx = (cwd_suggestion_idx + 1) % cwd_suggestions.len();
+                                        *input = cwd_suggestions[cwd_suggestion_idx].clone();
                                     } else {
-                                        cwd_suggestions.clear();
+                                        // First Tab: generate suggestions
+                                        let matches = smart_complete(input);
+                                        if matches.len() == 1 {
+                                            *input = matches[0].clone();
+                                        } else if !matches.is_empty() {
+                                            cwd_suggestion_idx = 0;
+                                            *input = matches[0].clone();
+                                            cwd_suggestions = matches;
+                                        }
+                                    }
+                                }
+                                KeyCode::BackTab => {
+                                    // Shift+Tab: cycle backwards
+                                    if !cwd_suggestions.is_empty() {
+                                        cwd_suggestion_idx = if cwd_suggestion_idx == 0 {
+                                            cwd_suggestions.len() - 1
+                                        } else {
+                                            cwd_suggestion_idx - 1
+                                        };
+                                        *input = cwd_suggestions[cwd_suggestion_idx].clone();
                                     }
                                 }
                                 KeyCode::Backspace => {
                                     input.pop();
-                                    cwd_suggestions = smart_complete(input);
+                                    cwd_suggestions.clear();
+                                    cwd_suggestion_idx = 0;
                                 }
                                 KeyCode::Char(c) => {
                                     input.push(c);
-                                    cwd_suggestions = smart_complete(input);
+                                    cwd_suggestions.clear();
+                                    cwd_suggestion_idx = 0;
                                 }
                                 _ => {}
                             }
@@ -615,47 +661,100 @@ pub fn run(restore_session: Option<crate::session::Session>) -> Result<(), Box<d
                     } // else (not cwd_input)
                     }
                     Event::Mouse(mouse) => {
-                        // Click → switch focus
-                        if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
-                            for (ap, rect) in &pane_rects {
-                                if mouse.column >= rect.x
-                                    && mouse.column < rect.x + rect.width
-                                    && mouse.row >= rect.y
-                                    && mouse.row < rect.y + rect.height
-                                {
-                                    if *ap != active {
-                                        switch_focus(active, *ap, &mut orchestrator, &mut workers);
-                                        active = *ap;
+                        match mouse.kind {
+                            MouseEventKind::Down(MouseButton::Left) => {
+                                // Record click start — find which pane
+                                selection = TextSelection::none();
+                                for (ap, rect) in &pane_rects {
+                                    let inner = ui::inner_rect(*rect);
+                                    if mouse.column >= inner.x && mouse.column < inner.x + inner.width
+                                        && mouse.row >= inner.y && mouse.row < inner.y + inner.height
+                                    {
+                                        let col = mouse.column - inner.x;
+                                        let row = mouse.row - inner.y;
+                                        selection = TextSelection {
+                                            pane: *ap,
+                                            start_col: col, start_row: row,
+                                            end_col: col, end_row: row,
+                                            active: false, // not yet a drag
+                                        };
+                                        // Switch focus
+                                        if *ap != active {
+                                            switch_focus(active, *ap, &mut orchestrator, &mut workers);
+                                            active = *ap;
+                                        }
+                                        break;
                                     }
-                                    break;
                                 }
                             }
-                        }
-                        // Forward mouse with coordinates relative to inner area
-                        if let Some((_, rect)) =
-                            pane_rects.iter().find(|(ap, _)| *ap == active)
-                        {
-                            let inner = ui::inner_rect(*rect);
-                            if mouse.column >= inner.x
-                                && mouse.column < inner.x + inner.width
-                                && mouse.row >= inner.y
-                                && mouse.row < inner.y + inner.height
-                            {
-                                let adjusted = MouseEvent {
-                                    kind: mouse.kind,
-                                    column: mouse.column - inner.x,
-                                    row: mouse.row - inner.y,
-                                    modifiers: mouse.modifiers,
-                                };
-                                let mp = active_pane_mut(
-                                    &mut orchestrator,
-                                    &mut workers,
-                                    &active,
-                                );
-                                if mp.pane.status == PaneStatus::Running {
-                                    let bytes = encode_mouse(adjusted);
-                                    if !bytes.is_empty() {
-                                        let _ = mp.pty.write(&bytes);
+                            MouseEventKind::Drag(MouseButton::Left) => {
+                                // Extend selection, clamped to starting pane
+                                if let Some((_, rect)) = pane_rects.iter().find(|(ap, _)| *ap == selection.pane) {
+                                    let inner = ui::inner_rect(*rect);
+                                    selection.end_col = mouse.column.saturating_sub(inner.x).min(inner.width.saturating_sub(1));
+                                    selection.end_row = mouse.row.saturating_sub(inner.y).min(inner.height.saturating_sub(1));
+                                    selection.active = true; // now it's a real selection
+                                }
+                            }
+                            MouseEventKind::Up(MouseButton::Left) => {
+                                if selection.active {
+                                    // Finalize selection → copy to clipboard
+                                    let mp = match selection.pane {
+                                        ActivePane::Orchestrator => &orchestrator,
+                                        ActivePane::Worker(idx) => workers.get(idx).unwrap_or(&orchestrator),
+                                    };
+                                    let text = extract_selection(&mp.pane.grid, &selection);
+                                    if !text.is_empty() {
+                                        copy_to_clipboard(&text);
+                                    }
+                                    // Keep selection visible until next click
+                                } else {
+                                    // Was a click (no drag) — forward to PTY
+                                    if let Some((_, rect)) = pane_rects.iter().find(|(ap, _)| *ap == active) {
+                                        let inner = ui::inner_rect(*rect);
+                                        if mouse.column >= inner.x && mouse.column < inner.x + inner.width
+                                            && mouse.row >= inner.y && mouse.row < inner.y + inner.height
+                                        {
+                                            // Forward both down and up events for click
+                                            let col = mouse.column - inner.x;
+                                            let row = mouse.row - inner.y;
+                                            let mp = active_pane_mut(&mut orchestrator, &mut workers, &active);
+                                            if mp.pane.status == PaneStatus::Running {
+                                                let down = MouseEvent {
+                                                    kind: MouseEventKind::Down(MouseButton::Left),
+                                                    column: col, row, modifiers: mouse.modifiers,
+                                                };
+                                                let up = MouseEvent {
+                                                    kind: MouseEventKind::Up(MouseButton::Left),
+                                                    column: col, row, modifiers: mouse.modifiers,
+                                                };
+                                                let bytes = encode_mouse(down);
+                                                if !bytes.is_empty() { let _ = mp.pty.write(&bytes); }
+                                                let bytes = encode_mouse(up);
+                                                if !bytes.is_empty() { let _ = mp.pty.write(&bytes); }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            _ => {
+                                // Forward other mouse events (scroll, etc.) to PTY
+                                if let Some((_, rect)) = pane_rects.iter().find(|(ap, _)| *ap == active) {
+                                    let inner = ui::inner_rect(*rect);
+                                    if mouse.column >= inner.x && mouse.column < inner.x + inner.width
+                                        && mouse.row >= inner.y && mouse.row < inner.y + inner.height
+                                    {
+                                        let adjusted = MouseEvent {
+                                            kind: mouse.kind,
+                                            column: mouse.column - inner.x,
+                                            row: mouse.row - inner.y,
+                                            modifiers: mouse.modifiers,
+                                        };
+                                        let mp = active_pane_mut(&mut orchestrator, &mut workers, &active);
+                                        if mp.pane.status == PaneStatus::Running {
+                                            let bytes = encode_mouse(adjusted);
+                                            if !bytes.is_empty() { let _ = mp.pty.write(&bytes); }
+                                        }
                                     }
                                 }
                             }
@@ -993,6 +1092,43 @@ fn dump_grid_debug(orchestrator: &ManagedPane, workers: &[ManagedPane], active: 
         }
     }
     let _ = writeln!(f, "\nDump complete.");
+}
+
+/// Extract selected text from grid.
+fn extract_selection(grid: &crate::pane::TerminalGrid, sel: &TextSelection) -> String {
+    let (sc, sr, ec, er) = sel.normalized();
+    let mut lines = Vec::new();
+    for r in sr..=er {
+        if let Some(row) = grid.view_row(r) {
+            let col_start = if r == sr { sc as usize } else { 0 };
+            let col_end = if r == er { (ec as usize) + 1 } else { row.len() };
+            let line: String = row[col_start..col_end.min(row.len())]
+                .iter()
+                .filter(|c| c.ch != '\0')
+                .map(|c| c.ch)
+                .collect();
+            lines.push(line.trim_end().to_string());
+        }
+    }
+    // Remove trailing empty lines
+    while lines.last().map_or(false, |l| l.is_empty()) {
+        lines.pop();
+    }
+    lines.join("\n")
+}
+
+/// Copy text to system clipboard (macOS: pbcopy).
+fn copy_to_clipboard(text: &str) {
+    use std::io::Write;
+    if let Ok(mut child) = std::process::Command::new("pbcopy")
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+    {
+        if let Some(ref mut stdin) = child.stdin {
+            let _ = stdin.write_all(text.as_bytes());
+        }
+        let _ = child.wait();
+    }
 }
 
 /// Heuristic extraction: find a line in grid output that looks like a corrected version.
