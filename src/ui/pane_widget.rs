@@ -8,12 +8,11 @@ use unicode_width::UnicodeWidthChar;
 
 pub struct PaneWidget<'a> {
     grid: &'a TerminalGrid,
-    focused: bool,
 }
 
 impl<'a> PaneWidget<'a> {
-    pub fn new(grid: &'a TerminalGrid, focused: bool) -> Self {
-        Self { grid, focused }
+    pub fn new(grid: &'a TerminalGrid, _focused: bool) -> Self {
+        Self { grid }
     }
 }
 
@@ -26,6 +25,7 @@ const DEFAULT_CELL: Cell = Cell {
     underline: false,
     dim: false,
     strikethrough: false,
+    reverse: false,
 };
 
 impl<'a> Widget for PaneWidget<'a> {
@@ -58,6 +58,7 @@ impl<'a> Widget for PaneWidget<'a> {
                         if cell.underline { m |= Modifier::UNDERLINED; }
                         if cell.dim { m |= Modifier::DIM; }
                         if cell.strikethrough { m |= Modifier::CROSSED_OUT; }
+                        if cell.reverse { m |= Modifier::REVERSED; }
                         buf_cell.modifier = m;
 
                         let w = char_width.unwrap_or(1) as u16;

@@ -15,16 +15,6 @@ pub struct PtyManager {
 }
 
 impl PtyManager {
-    pub fn spawn(
-        cmd: &str,
-        args: &[&str],
-        cols: u16,
-        rows: u16,
-        tx: Sender<PtyEvent>,
-    ) -> Result<Self, Box<dyn std::error::Error>> {
-        Self::spawn_with_cwd(cmd, args, cols, rows, tx, None)
-    }
-
     pub fn spawn_with_cwd(
         cmd: &str,
         args: &[&str],

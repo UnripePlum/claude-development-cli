@@ -3,6 +3,7 @@ pub mod grid;
 pub use grid::TerminalGrid;
 
 pub struct Pane {
+    #[allow(dead_code)]
     pub id: u32,
     pub name: String,
     pub grid: TerminalGrid,

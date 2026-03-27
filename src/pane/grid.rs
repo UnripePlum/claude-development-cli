@@ -12,6 +12,7 @@ pub struct Cell {
     pub underline: bool,
     pub dim: bool,
     pub strikethrough: bool,
+    pub reverse: bool,
 }
 
 impl Default for Cell {
@@ -25,6 +26,7 @@ impl Default for Cell {
             underline: false,
             dim: false,
             strikethrough: false,
+            reverse: false,
         }
     }
 }
@@ -38,6 +40,7 @@ struct CellAttr {
     underline: bool,
     dim: bool,
     strikethrough: bool,
+    reverse: bool,
 }
 
 pub struct CursorPos {
@@ -53,15 +56,19 @@ pub struct TerminalGrid {
     pub application_cursor_keys: bool,
     pub cursor_visible: bool,
     pub focus_tracking: bool,
+    pub is_receiving_prompt: bool,
     pub response_buf: Vec<u8>,
     pub scrollback: VecDeque<Vec<Cell>>,
     pub scroll_offset: usize,
     current_attr: CellAttr,
     scroll_top: u16,
     scroll_bottom: u16,
-    saved_cursor: Option<(u16, u16)>,
+    saved_cursor: Option<(u16, u16, bool)>, // (row, col, pending_wrap)
     last_char: Option<char>,
     max_scrollback: usize,
+    pending_wrap: bool,
+    auto_wrap: bool,
+    saved_screen: Option<(Vec<Vec<Cell>>, u16, u16)>, // (cells, cursor_row, cursor_col)
 }
 
 impl TerminalGrid {
@@ -75,6 +82,7 @@ impl TerminalGrid {
             application_cursor_keys: false,
             cursor_visible: true,
             focus_tracking: false,
+            is_receiving_prompt: false,
             response_buf: Vec::new(),
             scrollback: VecDeque::new(),
             scroll_offset: 0,
@@ -87,11 +95,15 @@ impl TerminalGrid {
                 underline: false,
                 dim: false,
                 strikethrough: false,
+                reverse: false,
             },
             scroll_top: 0,
             scroll_bottom: rows.saturating_sub(1),
             saved_cursor: None,
             last_char: None,
+            pending_wrap: false,
+            auto_wrap: true,
+            saved_screen: None,
         }
     }
 
@@ -110,9 +122,8 @@ impl TerminalGrid {
         self.cursor.col = self.cursor.col.min(cols.saturating_sub(1));
     }
 
-    pub fn cell_at(&self, row: u16, col: u16) -> &Cell {
-        &self.cells[row as usize][col as usize]
-    }
+    pub fn scroll_top(&self) -> u16 { self.scroll_top }
+    pub fn scroll_bottom(&self) -> u16 { self.scroll_bottom }
 
     /// Get a row for rendering, accounting for scroll_offset.
     /// When scroll_offset > 0, earlier rows come from scrollback.
@@ -140,12 +151,65 @@ impl TerminalGrid {
         self.scroll_offset = self.scroll_offset.saturating_sub(lines);
     }
 
+    /// Extract all visible text from the grid (full alt screen scan).
+    pub fn extract_all_text(&self) -> String {
+        let mut lines = Vec::new();
+        for r in 0..self.rows as usize {
+            if r < self.cells.len() {
+                let line: String = self.cells[r].iter().enumerate().filter_map(|(i, c)| {
+                    // Skip wide-char placeholder cells (char width 0 or \0)
+                    if c.ch == '\0' { return None; }
+                    if i > 0 {
+                        let prev = &self.cells[r][i - 1];
+                        if prev.ch.width().unwrap_or(1) == 2 && c.ch == ' ' {
+                            return None;
+                        }
+                    }
+                    Some(c.ch)
+                }).collect();
+                let trimmed = line.trim_end().to_string();
+                if !trimmed.is_empty() {
+                    lines.push(trimmed);
+                }
+            }
+        }
+        lines.join("\n")
+    }
+
+    /// Extract text between sentinel markers from the full grid.
+    pub fn extract_between_markers(&self, start_marker: &str, end_marker: &str) -> Option<String> {
+        let full = self.extract_all_text();
+        let start_pos = full.find(start_marker)?;
+        let content_start = start_pos + start_marker.len();
+        let end_pos = full[content_start..].find(end_marker)?;
+        let content = full[content_start..content_start + end_pos].trim();
+        if content.is_empty() {
+            None
+        } else {
+            Some(content.to_string())
+        }
+    }
+
+    #[cfg(test)]
+    pub fn cell_at(&self, row: usize, col: usize) -> &Cell {
+        &self.cells[row][col]
+    }
+
     fn write_char(&mut self, c: char) {
         self.scroll_offset = 0;
         let width = c.width().unwrap_or(1) as u16;
 
-        // If the character doesn't fit on this line, wrap
-        if self.cursor.col + width > self.cols {
+        // If pending wrap from previous write at last column, wrap now
+        if self.pending_wrap && self.auto_wrap {
+            self.pending_wrap = false;
+            self.cursor.col = 0;
+            self.scroll_up_if_needed();
+        } else {
+            self.pending_wrap = false;
+        }
+
+        // If the character doesn't fit on this line, wrap (only if auto_wrap)
+        if self.auto_wrap && self.cursor.col + width > self.cols {
             self.cursor.col = 0;
             self.scroll_up_if_needed();
         }
@@ -153,6 +217,32 @@ impl TerminalGrid {
         let r = self.cursor.row as usize;
         let c_idx = self.cursor.col as usize;
         if r < self.cells.len() && c_idx < self.cells[r].len() {
+            // Wide char overlap: if we're overwriting the 2nd cell of a previous
+            // wide char, destroy its 1st cell (replace with space)
+            if c_idx > 0 {
+                let prev = &self.cells[r][c_idx - 1];
+                if prev.ch.width().unwrap_or(1) == 2 {
+                    self.cells[r][c_idx - 1].ch = ' ';
+                }
+            }
+            // Wide char overlap: if we're writing a wide char that would
+            // overwrite the 1st cell of an existing wide char at c_idx+width
+            if width == 2 && c_idx + 2 < self.cells[r].len() {
+                let next2 = &self.cells[r][c_idx + 2];
+                // nothing needed — the cell at c_idx+1 is fully overwritten
+                let _ = next2;
+            }
+            // If we're overwriting a wide char's 1st cell, clear its 2nd cell
+            {
+                let old = &self.cells[r][c_idx];
+                if old.ch.width().unwrap_or(1) == 2 {
+                    let next = c_idx + 1;
+                    if next < self.cells[r].len() {
+                        self.cells[r][next] = Cell::default();
+                    }
+                }
+            }
+
             self.cells[r][c_idx] = Cell {
                 ch: c,
                 fg: self.current_attr.fg,
@@ -162,6 +252,7 @@ impl TerminalGrid {
                 underline: self.current_attr.underline,
                 dim: self.current_attr.dim,
                 strikethrough: self.current_attr.strikethrough,
+                reverse: self.current_attr.reverse,
             };
             // Fill the second cell of a wide character with a placeholder space
             if width == 2 {
@@ -177,6 +268,17 @@ impl TerminalGrid {
             }
         }
         self.cursor.col += width;
+        // If cursor reached the right edge
+        if self.cursor.col >= self.cols {
+            if self.auto_wrap {
+                // Enter pending wrap state (deferred wrapping)
+                self.cursor.col = self.cols.saturating_sub(1);
+                self.pending_wrap = true;
+            } else {
+                // DECAWM off: stay at right margin, overwrite in place
+                self.cursor.col = self.cols.saturating_sub(1);
+            }
+        }
         self.last_char = Some(c);
     }
 
@@ -308,12 +410,14 @@ impl TerminalGrid {
                         underline: false,
                         dim: false,
                         strikethrough: false,
+                        reverse: false,
                     };
                 }
                 1 => self.current_attr.bold = true,
                 2 => self.current_attr.dim = true,
                 3 => self.current_attr.italic = true,
                 4 => self.current_attr.underline = true,
+                7 => self.current_attr.reverse = true,
                 9 => self.current_attr.strikethrough = true,
                 22 => {
                     self.current_attr.bold = false;
@@ -322,6 +426,7 @@ impl TerminalGrid {
                 23 => self.current_attr.italic = false,
                 24 => self.current_attr.underline = false,
                 25 => self.current_attr.dim = false,
+                27 => self.current_attr.reverse = false,
                 29 => self.current_attr.strikethrough = false,
                 30..=37 => self.current_attr.fg = ansi_to_color(param - 30),
                 38 => {
@@ -408,14 +513,17 @@ impl vte::Perform for TerminalGrid {
         match byte {
             0x0A => {
                 // LF
+                self.pending_wrap = false;
                 self.scroll_up_if_needed();
             }
             0x0D => {
                 // CR
+                self.pending_wrap = false;
                 self.cursor.col = 0;
             }
             0x08 => {
                 // BS
+                self.pending_wrap = false;
                 self.cursor.col = self.cursor.col.saturating_sub(1);
             }
             0x09 => {
@@ -439,6 +547,7 @@ impl vte::Perform for TerminalGrid {
             'm' if intermediates.is_empty() => self.parse_sgr(params),
             'H' | 'f' => {
                 // CUP - Cursor Position
+                self.pending_wrap = false;
                 let row = param_or(params, 0, 1).saturating_sub(1);
                 let col = param_or(params, 1, 1).saturating_sub(1);
                 self.cursor.row = row.min(self.rows.saturating_sub(1));
@@ -446,31 +555,51 @@ impl vte::Perform for TerminalGrid {
             }
             'A' => {
                 // CUU - Cursor Up
+                self.pending_wrap = false;
                 let n = param_or(params, 0, 1);
                 self.cursor.row = self.cursor.row.saturating_sub(n);
             }
             'B' => {
                 // CUD - Cursor Down
+                self.pending_wrap = false;
                 let n = param_or(params, 0, 1);
                 self.cursor.row = (self.cursor.row + n).min(self.rows.saturating_sub(1));
             }
             'C' => {
                 // CUF - Cursor Forward
+                self.pending_wrap = false;
                 let n = param_or(params, 0, 1);
                 self.cursor.col = (self.cursor.col + n).min(self.cols.saturating_sub(1));
             }
             'D' => {
                 // CUB - Cursor Back
+                self.pending_wrap = false;
                 let n = param_or(params, 0, 1);
                 self.cursor.col = self.cursor.col.saturating_sub(n);
             }
+            'E' => {
+                // CNL - Cursor Next Line
+                self.pending_wrap = false;
+                let n = param_or(params, 0, 1);
+                self.cursor.row = (self.cursor.row + n).min(self.rows.saturating_sub(1));
+                self.cursor.col = 0;
+            }
+            'F' => {
+                // CPL - Cursor Previous Line
+                self.pending_wrap = false;
+                let n = param_or(params, 0, 1);
+                self.cursor.row = self.cursor.row.saturating_sub(n);
+                self.cursor.col = 0;
+            }
             'J' => {
                 // ED - Erase in Display
+                self.pending_wrap = false;
                 let mode = param_or(params, 0, 0);
                 self.erase_in_display(mode);
             }
             'K' => {
                 // EL - Erase in Line
+                self.pending_wrap = false;
                 let mode = param_or(params, 0, 0);
                 self.erase_in_line(mode);
             }
@@ -502,6 +631,7 @@ impl vte::Perform for TerminalGrid {
             }
             'r' => {
                 // DECSTBM - Set Scroll Region
+                self.pending_wrap = false;
                 let top = param_or(params, 0, 1).saturating_sub(1);
                 let bottom = param_or(params, 1, self.rows).saturating_sub(1);
                 self.scroll_top = top.min(self.rows.saturating_sub(1));
@@ -518,23 +648,46 @@ impl vte::Perform for TerminalGrid {
                             // DECCKM: Application cursor key mode
                             self.application_cursor_keys = enable;
                         }
-                        7 => {} // DECAWM: Auto-wrap mode — ignore (we always wrap)
+                        7 => self.auto_wrap = enable,
                         12 => {} // Blinking cursor — ignore
                         25 => self.cursor_visible = enable,
                         1000 | 1002 | 1003 | 1006 => {} // Mouse tracking modes — ignore
                         1004 => self.focus_tracking = enable,
                         2004 => {} // Bracketed paste mode — ignore
                         1049 | 47 | 1047 => {
-                            // Alternate screen buffer enter/leave: clear grid and
-                            // home cursor so there is no stale content underneath
-                            self.cells = vec![
-                                vec![Cell::default(); self.cols as usize];
-                                self.rows as usize
-                            ];
-                            self.cursor.row = 0;
-                            self.cursor.col = 0;
+                            if enable {
+                                // Enter alternate screen: save main buffer
+                                self.saved_screen = Some((
+                                    self.cells.clone(),
+                                    self.cursor.row,
+                                    self.cursor.col,
+                                ));
+                                self.cells = vec![
+                                    vec![Cell::default(); self.cols as usize];
+                                    self.rows as usize
+                                ];
+                                self.cursor.row = 0;
+                                self.cursor.col = 0;
+                            } else {
+                                // Leave alternate screen: restore main buffer
+                                if let Some((saved_cells, saved_row, saved_col)) = self.saved_screen.take() {
+                                    self.cells = saved_cells;
+                                    self.cursor.row = saved_row;
+                                    self.cursor.col = saved_col;
+                                    // Ensure grid matches current size
+                                    self.resize(self.cols, self.rows);
+                                } else {
+                                    self.cells = vec![
+                                        vec![Cell::default(); self.cols as usize];
+                                        self.rows as usize
+                                    ];
+                                    self.cursor.row = 0;
+                                    self.cursor.col = 0;
+                                }
+                            }
                             self.scroll_top = 0;
                             self.scroll_bottom = self.rows.saturating_sub(1);
+                            self.pending_wrap = false;
                         }
                         _ => {}
                     }
@@ -542,11 +695,13 @@ impl vte::Perform for TerminalGrid {
             }
             'd' => {
                 // VPA - Vertical Position Absolute
+                self.pending_wrap = false;
                 let row = param_or(params, 0, 1).saturating_sub(1);
                 self.cursor.row = row.min(self.rows.saturating_sub(1));
             }
             'G' => {
                 // CHA - Cursor Horizontal Absolute
+                self.pending_wrap = false;
                 let col = param_or(params, 0, 1).saturating_sub(1);
                 self.cursor.col = col.min(self.cols.saturating_sub(1));
             }
@@ -667,13 +822,14 @@ impl vte::Perform for TerminalGrid {
             }
             (b'7', _) => {
                 // DECSC - Save Cursor
-                self.saved_cursor = Some((self.cursor.row, self.cursor.col));
+                self.saved_cursor = Some((self.cursor.row, self.cursor.col, self.pending_wrap));
             }
             (b'8', _) => {
                 // DECRC - Restore Cursor
-                if let Some((row, col)) = self.saved_cursor {
+                if let Some((row, col, wrap)) = self.saved_cursor {
                     self.cursor.row = row;
                     self.cursor.col = col;
+                    self.pending_wrap = wrap;
                 }
             }
             _ => {}
@@ -992,5 +1148,102 @@ mod tests {
         // Should remain at last explicit position since no save happened
         assert_eq!(grid.cursor.row, 2);
         assert_eq!(grid.cursor.col, 3);
+    }
+
+    #[test]
+    fn test_decawm_off() {
+        // When DECAWM is off, characters at the right edge should NOT wrap
+        let mut grid = TerminalGrid::new(5, 3);
+        let mut parser = vte::Parser::new();
+        // Disable auto-wrap: \x1b[?7l
+        for byte in b"\x1b[?7l" {
+            parser.advance(&mut grid, *byte);
+        }
+        // Write 7 characters — should stay on row 0, last 2 overwrite at col 4
+        for byte in b"ABCDEFG" {
+            parser.advance(&mut grid, *byte);
+        }
+        assert_eq!(grid.cursor.row, 0); // stayed on row 0
+        assert_eq!(grid.cell_at(0, 0).ch, 'A');
+        assert_eq!(grid.cell_at(0, 3).ch, 'D');
+        assert_eq!(grid.cell_at(0, 4).ch, 'G'); // last char overwrites at edge
+        assert_eq!(grid.cell_at(1, 0).ch, ' '); // row 1 untouched
+    }
+
+    #[test]
+    fn test_decawm_on_restore() {
+        // Re-enable DECAWM should restore wrapping behavior
+        let mut grid = TerminalGrid::new(5, 3);
+        let mut parser = vte::Parser::new();
+        for byte in b"\x1b[?7l" { parser.advance(&mut grid, *byte); }
+        for byte in b"\x1b[?7h" { parser.advance(&mut grid, *byte); }
+        // Now write 6 chars — should wrap to row 1
+        for byte in b"ABCDEF" {
+            parser.advance(&mut grid, *byte);
+        }
+        assert_eq!(grid.cell_at(0, 4).ch, 'E');
+        assert_eq!(grid.cell_at(1, 0).ch, 'F');
+    }
+
+    #[test]
+    fn test_alt_screen_save_restore() {
+        let mut grid = TerminalGrid::new(10, 3);
+        let mut parser = vte::Parser::new();
+        // Write content on main screen
+        for byte in b"Hello" {
+            parser.advance(&mut grid, *byte);
+        }
+        assert_eq!(grid.cell_at(0, 0).ch, 'H');
+        // Enter alt screen
+        for byte in b"\x1b[?1049h" {
+            parser.advance(&mut grid, *byte);
+        }
+        // Alt screen should be clear
+        assert_eq!(grid.cell_at(0, 0).ch, ' ');
+        // Write something on alt screen
+        for byte in b"Alt" {
+            parser.advance(&mut grid, *byte);
+        }
+        assert_eq!(grid.cell_at(0, 0).ch, 'A');
+        // Leave alt screen — main content should be restored
+        for byte in b"\x1b[?1049l" {
+            parser.advance(&mut grid, *byte);
+        }
+        assert_eq!(grid.cell_at(0, 0).ch, 'H');
+        assert_eq!(grid.cell_at(0, 4).ch, 'o');
+    }
+
+    #[test]
+    fn test_extract_all_text() {
+        let mut grid = TerminalGrid::new(20, 3);
+        let mut parser = vte::Parser::new();
+        for byte in b"Hello World\r\nLine 2" {
+            parser.advance(&mut grid, *byte);
+        }
+        let text = grid.extract_all_text();
+        assert!(text.contains("Hello World"));
+        assert!(text.contains("Line 2"));
+    }
+
+    #[test]
+    fn test_extract_between_markers() {
+        let mut grid = TerminalGrid::new(60, 3);
+        let mut parser = vte::Parser::new();
+        for byte in b"prefix [CDC_CORRECT]corrected text[/CDC_CORRECT] suffix" {
+            parser.advance(&mut grid, *byte);
+        }
+        let result = grid.extract_between_markers("[CDC_CORRECT]", "[/CDC_CORRECT]");
+        assert_eq!(result, Some("corrected text".to_string()));
+    }
+
+    #[test]
+    fn test_extract_between_markers_missing() {
+        let mut grid = TerminalGrid::new(30, 3);
+        let mut parser = vte::Parser::new();
+        for byte in b"no markers here" {
+            parser.advance(&mut grid, *byte);
+        }
+        let result = grid.extract_between_markers("[CDC_CORRECT]", "[/CDC_CORRECT]");
+        assert_eq!(result, None);
     }
 }

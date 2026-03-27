@@ -2,10 +2,12 @@ pub mod pane_widget;
 
 pub use pane_widget::PaneWidget;
 
+use crate::app::Dialog;
 use crate::pane::{Pane, PaneStatus};
+use crate::voice::VoiceState;
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Style};
-use ratatui::widgets::{Block, Borders};
+use ratatui::style::{Color, Modifier, Style};
+use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 use ratatui::Frame;
 
 /// Which pane is currently focused.
@@ -74,13 +76,18 @@ pub fn render(
     worker_panes: &[&Pane],
     active: &ActivePane,
     fullscreen: Option<ActivePane>,
+    frame_count: u64,
+    voice_state: &VoiceState,
+    correcting: bool,
 ) -> Vec<(ActivePane, Rect)> {
     // Fullscreen mode: render only the focused pane at full area
     if let Some(fs) = fullscreen {
         let area = frame.area();
         match fs {
             ActivePane::Orchestrator => {
-                render_pane(frame, orchestrator, area, true, "Orchestrator [fullscreen]");
+                let title = voice_title("Orchestrator [fullscreen]", voice_state, correcting);
+                render_pane(frame, orchestrator, area, true, &title, frame_count);
+                set_cursor_for_ime(frame, orchestrator, area);
             }
             ActivePane::Worker(idx) => {
                 if let Some(pane) = worker_panes.get(idx) {
@@ -90,7 +97,9 @@ pub fn render(
                         area,
                         true,
                         &format!("Worker {} [fullscreen]", idx + 1),
+                        frame_count,
                     );
+                    set_cursor_for_ime(frame, pane, area);
                 }
             }
         }
@@ -104,19 +113,35 @@ pub fn render(
     for (i, pane) in worker_panes.iter().enumerate() {
         let rect = layout.worker_rects[i];
         let focused = *active == ActivePane::Worker(i);
-        render_pane(frame, pane, rect, focused, &format!("Worker {}", i + 1));
+        render_pane(frame, pane, rect, focused, &format!("Worker {}", i + 1), frame_count);
         rects.push((ActivePane::Worker(i), rect));
     }
 
     let orch_focused = *active == ActivePane::Orchestrator;
+    let orch_title = voice_title("Orchestrator", voice_state, correcting);
     render_pane(
         frame,
         orchestrator,
         layout.orch_rect,
         orch_focused,
-        "Orchestrator",
+        &orch_title,
+        frame_count,
     );
     rects.push((ActivePane::Orchestrator, layout.orch_rect));
+
+    // Set hardware cursor position for IME input on the active pane
+    match active {
+        ActivePane::Orchestrator => {
+            set_cursor_for_ime(frame, orchestrator, layout.orch_rect);
+        }
+        ActivePane::Worker(idx) => {
+            if let Some(pane) = worker_panes.get(*idx) {
+                if let Some(rect) = layout.worker_rects.get(*idx) {
+                    set_cursor_for_ime(frame, pane, *rect);
+                }
+            }
+        }
+    }
 
     rects
 }
@@ -148,8 +173,82 @@ pub fn render_cwd_input(frame: &mut Frame, input: &str, suggestions: &[String]) 
     frame.render_widget(paragraph, rect);
 }
 
-fn render_pane(frame: &mut Frame, pane: &Pane, area: Rect, focused: bool, title: &str) {
-    let border_color = if focused {
+/// Set the hardware cursor position for IME composition.
+/// Position the cursor so the OS IME overlay (Korean, Japanese, etc.)
+/// appears at the right place. We use set_cursor_position which also
+/// makes the cursor visible — this doubles as Claude's text cursor.
+fn set_cursor_for_ime(frame: &mut Frame, pane: &Pane, outer_rect: Rect) {
+    let inner = inner_rect(outer_rect);
+    let cursor_col = pane.grid.cursor.col;
+    let cursor_row = pane.grid.cursor.row;
+    let x = inner.x + cursor_col;
+    let y = inner.y + cursor_row;
+    // Only set if within bounds
+    if x < inner.x + inner.width && y < inner.y + inner.height {
+        frame.set_cursor_position(ratatui::layout::Position::new(x, y));
+    }
+}
+
+
+/// Build orchestrator title with voice state suffix.
+fn voice_title(base: &str, voice_state: &VoiceState, correcting: bool) -> String {
+    if correcting {
+        return format!("{} [CORRECTING...]", base);
+    }
+    match voice_state {
+        VoiceState::Idle => base.to_string(),
+        VoiceState::Recording => format!("{} [REC]", base),
+        VoiceState::Downloading(dl, total) => {
+            let pct = if *total > 0 { dl * 100 / total } else { 0 };
+            format!("{} [DL: {}%]", base, pct)
+        }
+        VoiceState::Transcribing => format!("{} [STT...]", base),
+        VoiceState::Error(msg) => {
+            let short = if msg.len() > 30 { &msg[..30] } else { msg };
+            format!("{} [ERR: {}]", base, short)
+        }
+    }
+}
+
+/// Detect if a pane needs permission or is waiting for input by scanning last rows.
+fn detect_pane_alert(pane: &Pane) -> PaneAlert {
+    if pane.status != PaneStatus::Running {
+        return PaneAlert::None;
+    }
+    // Scan last 5 rows of visible grid for permission/input patterns
+    let rows = pane.grid.rows;
+    for r in rows.saturating_sub(5)..rows {
+        if let Some(row) = pane.grid.view_row(r) {
+            let line: String = row.iter().map(|c| c.ch).collect();
+            let trimmed = line.trim();
+            // Claude Code permission patterns
+            if trimmed.contains("Allow") && (trimmed.contains("(y/n)") || trimmed.contains("Yes") || trimmed.contains("allow this")) {
+                return PaneAlert::NeedsPermission;
+            }
+            if trimmed.contains("Do you want to proceed") || trimmed.contains("approve") {
+                return PaneAlert::NeedsPermission;
+            }
+        }
+    }
+    PaneAlert::None
+}
+
+#[derive(PartialEq)]
+enum PaneAlert {
+    None,
+    NeedsPermission,
+    ReceivingPrompt, // for SendToWorker yellow blink
+}
+
+fn render_pane(frame: &mut Frame, pane: &Pane, area: Rect, focused: bool, title: &str, frame_count: u64) {
+    let alert = detect_pane_alert(pane);
+    let blink_on = (frame_count / 15) % 2 == 0; // ~0.5s blink at 60fps
+
+    let border_color = if alert == PaneAlert::NeedsPermission && blink_on {
+        Color::Red
+    } else if alert == PaneAlert::ReceivingPrompt && blink_on {
+        Color::Yellow
+    } else if focused {
         Color::Cyan
     } else if pane.status != PaneStatus::Running {
         Color::DarkGray
@@ -159,16 +258,75 @@ fn render_pane(frame: &mut Frame, pane: &Pane, area: Rect, focused: bool, title:
 
     let title_str = if let PaneStatus::Exited(code) = &pane.status {
         format!("{} [exited: {}]", title, code)
+    } else if alert == PaneAlert::NeedsPermission {
+        format!("{} [NEEDS PERMISSION]", title)
+    } else if pane.grid.is_receiving_prompt {
+        format!("{} [receiving prompt]", title)
     } else {
         title.to_string()
     };
 
+    let mut border_style = Style::default().fg(border_color);
+    if alert == PaneAlert::NeedsPermission && blink_on {
+        border_style = border_style.add_modifier(Modifier::BOLD);
+    }
+
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(border_color))
+        .border_style(border_style)
         .title(title_str);
 
     let inner = block.inner(area);
     frame.render_widget(block, area);
     frame.render_widget(PaneWidget::new(&pane.grid, focused), inner);
+}
+
+/// Render a confirmation/input dialog overlay.
+pub fn render_dialog(frame: &mut Frame, dialog: &Dialog) {
+    let area = frame.area();
+    let width = 50u16.min(area.width.saturating_sub(4));
+    let x = (area.width.saturating_sub(width)) / 2;
+
+    match dialog {
+        Dialog::ConfirmQuit => {
+            let height = 5u16;
+            let y = (area.height.saturating_sub(height)) / 2;
+            let rect = Rect::new(x, y, width, height);
+            let block = Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Red))
+                .title("Quit CDC?");
+            let text = "All workers will be terminated.\n\n  [Y] Quit   [N] Cancel";
+            let p = Paragraph::new(text).block(block);
+            frame.render_widget(Clear, rect);
+            frame.render_widget(p, rect);
+        }
+        Dialog::ConfirmCloseWorker(idx) => {
+            let height = 5u16;
+            let y = (area.height.saturating_sub(height)) / 2;
+            let rect = Rect::new(x, y, width, height);
+            let block = Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Yellow))
+                .title(format!("Close Worker {}?", idx + 1));
+            let text = "Worker process will be killed.\n\n  [Y] Close   [N] Cancel";
+            let p = Paragraph::new(text).block(block);
+            frame.render_widget(Clear, rect);
+            frame.render_widget(p, rect);
+        }
+        Dialog::SaveSession(input) => {
+            let height = 4u16;
+            let y = (area.height.saturating_sub(height)) / 2;
+            let rect = Rect::new(x, y, width, height);
+            let block = Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Green))
+                .title("Save Session");
+            let text = format!("Name (Enter=auto): {}_", input);
+            let p = Paragraph::new(text).block(block);
+            frame.render_widget(Clear, rect);
+            frame.render_widget(p, rect);
+        }
+        Dialog::None => {}
+    }
 }

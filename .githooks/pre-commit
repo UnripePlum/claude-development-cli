@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+echo "==> [pre-commit] Running cargo check..."
+cargo check 2>&1
+if [ $? -ne 0 ]; then
+    echo "FAIL: cargo check failed"
+    exit 1
+fi
+
+echo "==> [pre-commit] Running cargo test..."
+cargo test 2>&1
+if [ $? -ne 0 ]; then
+    echo "FAIL: tests failed"
+    exit 1
+fi
+
+echo "==> [pre-commit] All checks passed."

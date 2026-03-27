@@ -2,6 +2,7 @@ use crate::event::{encode_key, encode_mouse};
 use crate::pane::{Pane, PaneStatus};
 use crate::pty::{PtyEvent, PtyManager};
 use crate::ui::{self, ActivePane};
+use crate::voice::{VoiceEvent, VoiceManager, VoiceState};
 
 use crossbeam_channel::Receiver;
 use crossterm::event::{
@@ -12,7 +13,46 @@ use crossterm::terminal::{EnterAlternateScreen, LeaveAlternateScreen};
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::Rect;
 use ratatui::Terminal;
-use std::time::Duration;
+use std::time::{Duration, Instant};
+
+/// Voice correction state machine.
+enum CorrectionState {
+    Idle,
+    WaitingForResponse {
+        raw_text: String,
+        hard_ceiling: Instant,
+    },
+}
+
+fn correction_timeout_ms() -> u64 {
+    std::env::var("CDC_CORRECTION_TIMEOUT_MS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(5000)
+}
+
+fn correction_quiescence_ms() -> u64 {
+    std::env::var("CDC_CORRECTION_QUIESCENCE_MS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(500)
+}
+
+fn format_correction_prompt(raw: &str) -> String {
+    format!(
+        "다음 음성 명령의 오타를 보정해서 [CDC_CORRECT] 태그 안에 결과만 출력해: {}\n예시: [CDC_CORRECT]보정된 텍스트[/CDC_CORRECT]",
+        raw
+    )
+}
+
+/// Active confirmation dialog.
+#[derive(Clone, PartialEq)]
+pub enum Dialog {
+    None,
+    ConfirmQuit,
+    ConfirmCloseWorker(usize),
+    SaveSession(String), // input buffer for session name
+}
 
 /// RAII guard that restores the terminal on any exit path (panic, error, normal).
 struct TerminalGuard;
@@ -31,6 +71,8 @@ impl Drop for TerminalGuard {
 /// A pane bundled with its PTY and event receiver.
 pub struct ManagedPane {
     pub pane: Pane,
+    pub cwd: Option<String>,
+    pub last_output_time: Option<Instant>,
     pty: PtyManager,
     pty_rx: Receiver<PtyEvent>,
 }
@@ -49,6 +91,8 @@ impl ManagedPane {
         let pty = PtyManager::spawn_with_cwd(cmd, &[], cols, rows, tx, cwd)?;
         Ok(Self {
             pane,
+            cwd: cwd.map(|s| s.to_string()),
+            last_output_time: None,
             pty,
             pty_rx: rx,
         })
@@ -57,7 +101,10 @@ impl ManagedPane {
     fn drain_output(&mut self) {
         while let Ok(event) = self.pty_rx.try_recv() {
             match event {
-                PtyEvent::Output(data) => self.pane.process_bytes(&data),
+                PtyEvent::Output(data) => {
+                    self.pane.process_bytes(&data);
+                    self.last_output_time = Some(Instant::now());
+                }
                 PtyEvent::Exited => {
                     let code = self.pty.try_wait_exit_code().unwrap_or(0);
                     self.pane.status = PaneStatus::Exited(code);
@@ -72,6 +119,10 @@ impl ManagedPane {
             let _ = self.pty.write(&responses);
         }
     }
+
+    pub fn write_to_pty(&mut self, data: &[u8]) -> std::io::Result<()> {
+        self.pty.write(data)
+    }
 }
 
 fn term_rect(terminal: &Terminal<CrosstermBackend<std::io::Stdout>>) -> Rect {
@@ -79,7 +130,7 @@ fn term_rect(terminal: &Terminal<CrosstermBackend<std::io::Stdout>>) -> Rect {
     Rect::new(0, 0, s.width, s.height)
 }
 
-pub fn run() -> Result<(), Box<dyn std::error::Error>> {
+pub fn run(restore_session: Option<crate::session::Session>) -> Result<(), Box<dyn std::error::Error>> {
     // Install panic hook BEFORE entering raw mode
     let original_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
@@ -114,10 +165,43 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut workers: Vec<ManagedPane> = Vec::new();
     let mut active = ActivePane::Orchestrator;
     let mut next_id = 1u32;
+
+    // Restore session: spawn workers from saved session
+    if let Some(ref session) = restore_session {
+        for wi in &session.workers {
+            let new_count = workers.len() + 1;
+            let layout = ui::compute_layout(term_rect(&terminal), new_count);
+            if let Some(rect) = layout.worker_rects.last() {
+                let inner = ui::inner_rect(*rect);
+                if let Ok(mp) = ManagedPane::spawn(
+                    next_id,
+                    wi.name.clone(),
+                    &cmd,
+                    inner.width,
+                    inner.height,
+                    wi.cwd.as_deref(),
+                ) {
+                    workers.push(mp);
+                    next_id += 1;
+                }
+            }
+        }
+        if !workers.is_empty() {
+            resize_all_panes(&mut orchestrator, &mut workers, term_rect(&terminal), None);
+        }
+    }
     let mut pane_rects: Vec<(ActivePane, Rect)> = Vec::new();
     let mut fullscreen: Option<ActivePane> = None;
     let mut cwd_input: Option<String> = None; // Some = entering cwd for new worker
     let mut cwd_suggestions: Vec<String> = Vec::new();
+    let mut dialog = Dialog::None;
+    let mut frame_count: u64 = 0;
+    let mut _loop_start = Instant::now();
+
+    // Voice input
+    let (mut voice_mgr, voice_rx) = VoiceManager::new();
+    let mut voice_state = VoiceState::Idle;
+    let mut correction_state = CorrectionState::Idle;
 
     // Main event loop
     loop {
@@ -133,6 +217,60 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             w.flush_responses();
         }
 
+        // 2b. Drain voice events
+        while let Ok(event) = voice_rx.try_recv() {
+            match event {
+                VoiceEvent::Transcribed(text) => {
+                    // Cancel any pending correction (fallback raw)
+                    if let CorrectionState::WaitingForResponse { raw_text, .. } = &correction_state {
+                        route_text(raw_text, &mut orchestrator, &mut workers);
+                    }
+                    // Start correction via orchestrator Claude
+                    if orchestrator.pane.status == PaneStatus::Running {
+                        let prompt = format_correction_prompt(&text);
+                        let _ = orchestrator.write_to_pty(format!("{}\n", prompt).as_bytes());
+                        correction_state = CorrectionState::WaitingForResponse {
+                            raw_text: text,
+                            hard_ceiling: Instant::now() + Duration::from_millis(correction_timeout_ms()),
+                        };
+                    } else {
+                        // Orchestrator not running — skip correction, route raw
+                        route_text(&text, &mut orchestrator, &mut workers);
+                    }
+                    voice_state = VoiceState::Idle;
+                }
+                VoiceEvent::StateChanged(state) => {
+                    voice_state = state;
+                }
+                VoiceEvent::DownloadProgress(dl, total) => {
+                    voice_state = VoiceState::Downloading(dl, total);
+                }
+                VoiceEvent::Error(msg) => {
+                    voice_state = VoiceState::Error(msg);
+                }
+            }
+        }
+
+        // 2c. Check voice recording timeout
+        voice_mgr.check_timeout();
+
+        // 2d. Check correction state (quiescence or hard ceiling)
+        if let CorrectionState::WaitingForResponse { ref raw_text, hard_ceiling } = correction_state {
+            let quiescent = orchestrator.last_output_time
+                .map_or(false, |t| t.elapsed() > Duration::from_millis(correction_quiescence_ms()));
+            let ceiling_hit = Instant::now() >= hard_ceiling;
+
+            if quiescent || ceiling_hit {
+                // Extract corrected text from orchestrator grid
+                let corrected = orchestrator.pane.grid
+                    .extract_between_markers("[CDC_CORRECT]", "[/CDC_CORRECT]")
+                    .unwrap_or_else(|| raw_text.clone());
+
+                route_text(&corrected, &mut orchestrator, &mut workers);
+                correction_state = CorrectionState::Idle;
+            }
+        }
+
         // 3. Draw
         {
             let worker_panes: Vec<&Pane> = workers.iter().map(|w| &w.pane).collect();
@@ -140,13 +278,21 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             let rects_out = &mut pane_rects;
             let cwd_ref = &cwd_input;
             let sugg_ref = &cwd_suggestions;
+            let dialog_ref = &dialog;
+            let fc = frame_count;
+            let vs = &voice_state;
+            let correcting = matches!(correction_state, CorrectionState::WaitingForResponse { .. });
             terminal.draw(|frame| {
-                *rects_out = ui::render(frame, &orchestrator.pane, &worker_panes, &active_copy, fullscreen);
+                *rects_out = ui::render(frame, &orchestrator.pane, &worker_panes, &active_copy, fullscreen, fc, vs, correcting);
                 if let Some(input) = cwd_ref {
                     ui::render_cwd_input(frame, input, sugg_ref);
                 }
+                if *dialog_ref != Dialog::None {
+                    ui::render_dialog(frame, dialog_ref);
+                }
             })?;
         }
+        frame_count = frame_count.wrapping_add(1);
 
         // 4. Poll crossterm events (16ms timeout ≈ 60fps)
         //    Drain ALL pending events per frame to avoid IME input lag
@@ -157,6 +303,93 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                 let event = crossterm::event::read()?;
                 match event {
                     Event::Key(key) => {
+                        // Dialog mode: intercept Y/N/Esc
+                        if dialog != Dialog::None {
+                            match &dialog {
+                                Dialog::ConfirmQuit => match key.code {
+                                    KeyCode::Char('y') | KeyCode::Char('Y') => {
+                                        should_quit = true;
+                                        break;
+                                    }
+                                    KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                                        dialog = Dialog::None;
+                                    }
+                                    _ => {}
+                                },
+                                Dialog::ConfirmCloseWorker(idx) => {
+                                    let idx = *idx;
+                                    match key.code {
+                                        KeyCode::Char('y') | KeyCode::Char('Y') => {
+                                            if idx < workers.len() {
+                                                let mut removed = workers.remove(idx);
+                                                let _ = removed.pty.kill();
+                                                let new = if workers.is_empty() {
+                                                    ActivePane::Orchestrator
+                                                } else {
+                                                    ActivePane::Worker(idx.min(workers.len() - 1))
+                                                };
+                                                switch_focus(active, new, &mut orchestrator, &mut workers);
+                                                active = new;
+                                                fullscreen = None;
+                                                resize_all_panes(
+                                                    &mut orchestrator,
+                                                    &mut workers,
+                                                    term_rect(&terminal),
+                                                    None,
+                                                );
+                                            }
+                                            dialog = Dialog::None;
+                                        }
+                                        KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                                            dialog = Dialog::None;
+                                        }
+                                        _ => {}
+                                    }
+                                }
+                                Dialog::SaveSession(_input) => {
+                                    // Handled below in session section
+                                    match key.code {
+                                        KeyCode::Enter => {
+                                            if let Dialog::SaveSession(ref name) = dialog {
+                                                let session_name = if name.is_empty() {
+                                                    chrono::Local::now().format("session-%Y%m%d-%H%M%S").to_string()
+                                                } else {
+                                                    name.clone()
+                                                };
+                                                let worker_infos: Vec<_> = workers.iter().map(|w| {
+                                                    crate::session::WorkerInfo {
+                                                        name: w.pane.name.clone(),
+                                                        cwd: w.cwd.clone(),
+                                                    }
+                                                }).collect();
+                                                let session = crate::session::Session {
+                                                    name: session_name,
+                                                    workers: worker_infos,
+                                                    created_at: chrono::Local::now().to_rfc3339(),
+                                                };
+                                                let _ = crate::session::save_session(&session);
+                                            }
+                                            dialog = Dialog::None;
+                                        }
+                                        KeyCode::Esc => {
+                                            dialog = Dialog::None;
+                                        }
+                                        KeyCode::Backspace => {
+                                            if let Dialog::SaveSession(ref mut name) = dialog {
+                                                name.pop();
+                                            }
+                                        }
+                                        KeyCode::Char(c) => {
+                                            if let Dialog::SaveSession(ref mut name) = dialog {
+                                                name.push(c);
+                                            }
+                                        }
+                                        _ => {}
+                                    }
+                                }
+                                Dialog::None => unreachable!(),
+                            }
+                        } else
                         // CWD input mode: capture keys for directory path
                         if let Some(ref mut input) = cwd_input {
                             match key.code {
@@ -256,8 +489,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                         if ctrl {
                             match key.code {
                                 KeyCode::Char('q') => {
-                                    should_quit = true;
-                                    break;
+                                    dialog = Dialog::ConfirmQuit;
                                 }
                                 KeyCode::Char('z') => {
                                     // Toggle fullscreen
@@ -283,28 +515,26 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                                     // Enter cwd input mode for new worker
                                     cwd_input = Some(String::new());
                                 }
+                                KeyCode::Char('d') => {
+                                    // Debug: dump grid state to file
+                                    dump_grid_debug(&orchestrator, &workers, &active);
+                                }
                                 KeyCode::Char('w') => {
-                                    // Close focused worker
+                                    // Close focused worker (with confirmation)
                                     if let ActivePane::Worker(idx) = active {
                                         if idx < workers.len() {
-                                            let mut removed = workers.remove(idx);
-                                            let _ = removed.pty.kill();
-                                            let new = if workers.is_empty() {
-                                                ActivePane::Orchestrator
-                                            } else {
-                                                ActivePane::Worker(idx.min(workers.len() - 1))
-                                            };
-                                            switch_focus(active, new, &mut orchestrator, &mut workers);
-                                            active = new;
-                                            fullscreen = None; // exit fullscreen on layout change
-                                            resize_all_panes(
-                                                &mut orchestrator,
-                                                &mut workers,
-                                                term_rect(&terminal),
-                                                None,
-                                            );
+                                            dialog = Dialog::ConfirmCloseWorker(idx);
                                         }
                                     }
+                                }
+                                KeyCode::Char('r') => {
+                                    // Voice input: toggle recording
+                                    // Note: Ctrl+R no longer forwards to child PTY (was reverse-search in bash)
+                                    voice_mgr.toggle();
+                                }
+                                KeyCode::Char('s') => {
+                                    // Save session
+                                    dialog = Dialog::SaveSession(String::new());
                                 }
                                 KeyCode::Char(c @ '1'..='9') => {
                                     let idx = (c as usize) - ('1' as usize);
@@ -719,6 +949,118 @@ fn search_dirs_segments(
         // Also recurse with all segments (directory name didn't match first segment)
         search_dirs_segments(&path_str, segments, depth - 1, home, results);
     }
+}
+
+/// Dump grid contents to /tmp/cdc_grid_debug.txt for debugging.
+fn dump_grid_debug(orchestrator: &ManagedPane, workers: &[ManagedPane], active: &ui::ActivePane) {
+    use std::io::Write;
+    let Ok(mut f) = std::fs::File::create("/tmp/cdc_grid_debug.txt") else { return };
+    let mp = match active {
+        ui::ActivePane::Orchestrator => orchestrator,
+        ui::ActivePane::Worker(idx) => {
+            if let Some(w) = workers.get(*idx) { w } else { return }
+        }
+    };
+    let grid = &mp.pane.grid;
+    let _ = writeln!(f, "Grid: {}x{} cursor=({},{}) scroll_offset={} scroll_top={} scroll_bottom={}",
+        grid.cols, grid.rows, grid.cursor.row, grid.cursor.col,
+        grid.scroll_offset, grid.scroll_top(), grid.scroll_bottom());
+    let _ = writeln!(f, "Scrollback lines: {}", grid.scrollback.len());
+    let _ = writeln!(f, "\n=== Grid contents (row: text) ===");
+    for r in 0..grid.rows {
+        let row = &grid.cells[r as usize];
+        let text: String = row.iter().map(|c| c.ch).collect();
+        let trimmed = text.trim_end();
+        if !trimmed.is_empty() {
+            let _ = writeln!(f, "[{:03}] {}", r, trimmed);
+        }
+    }
+    let _ = writeln!(f, "\n=== Last 20 scrollback lines ===");
+    let sb_len = grid.scrollback.len();
+    let start = sb_len.saturating_sub(20);
+    for (i, row) in grid.scrollback.iter().skip(start).enumerate() {
+        let text: String = row.iter().map(|c| c.ch).collect();
+        let trimmed = text.trim_end();
+        if !trimmed.is_empty() {
+            let _ = writeln!(f, "[sb {:03}] {}", start + i, trimmed);
+        }
+    }
+    let _ = writeln!(f, "\nDump complete.");
+}
+
+/// Route text to worker (if pattern matches) or orchestrator.
+fn route_text(text: &str, orchestrator: &mut ManagedPane, workers: &mut [ManagedPane]) {
+    if let Some((worker_idx, content)) = parse_worker_route(text) {
+        if let Some(w) = workers.get_mut(worker_idx) {
+            if w.pane.status == PaneStatus::Running {
+                let _ = w.write_to_pty(format!("{}\n", content).as_bytes());
+            }
+        }
+    } else {
+        let _ = orchestrator.write_to_pty(format!("{}\n", text).as_bytes());
+    }
+}
+
+/// Parse voice command for worker routing.
+/// Matches patterns like "워커 1에게 ...", "worker 2에 ...", "워커 1번에 ..."
+/// Returns (worker_index_0based, content_to_send) or None.
+fn parse_worker_route(text: &str) -> Option<(usize, String)> {
+    let t = text.trim();
+    let lower = t.to_lowercase();
+
+    // Patterns: "워커 N에게 ...", "워커 N번에 ...", "worker N에 ..."
+    let prefixes = ["워커 ", "워커", "worker ", "worker"];
+    let mut rest = None;
+    for p in &prefixes {
+        if let Some(r) = lower.strip_prefix(p) {
+            // Use original text positioning
+            rest = Some(&t[p.len()..]);
+            let _ = r; // use lowercase match but original text
+            break;
+        }
+    }
+    let rest = rest?.trim();
+
+    // Extract number: "1에게 ...", "2번에 ...", "1 ..."
+    let num_end = rest.find(|c: char| !c.is_ascii_digit()).unwrap_or(rest.len());
+    if num_end == 0 {
+        // Try Korean number words
+        let korean_nums = [
+            ("일", 1), ("이", 2), ("삼", 3), ("사", 4), ("오", 5),
+            ("육", 6), ("칠", 7), ("팔", 8), ("구", 9),
+            ("하나", 1), ("둘", 2), ("셋", 3), ("넷", 4), ("다섯", 5),
+        ];
+        for (word, num) in &korean_nums {
+            if rest.starts_with(word) {
+                let after = rest[word.len()..].trim();
+                // Skip particles: 에게, 에, 번에, 번에게, 한테
+                let content = strip_particle(after);
+                if !content.is_empty() {
+                    return Some(((*num - 1) as usize, content.to_string()));
+                }
+            }
+        }
+        return None;
+    }
+
+    let num: usize = rest[..num_end].parse().ok()?;
+    if num == 0 { return None; }
+    let after = rest[num_end..].trim();
+    let content = strip_particle(after);
+    if content.is_empty() { return None; }
+
+    Some((num - 1, content.to_string()))
+}
+
+/// Strip Korean particles from the beginning: 에게, 에, 번에게, 번에, 한테, 에다가
+fn strip_particle(s: &str) -> &str {
+    let particles = ["번에게 ", "번에게", "번에 ", "번에", "에게 ", "에게", "한테 ", "한테", "에다가 ", "에다가", "에 ", "에"];
+    for p in &particles {
+        if let Some(rest) = s.strip_prefix(p) {
+            return rest.trim();
+        }
+    }
+    s.trim()
 }
 
 /// Find the longest common prefix among strings.
