@@ -1,18 +1,97 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-echo "==> [pre-commit] Running cargo check..."
-cargo check 2>&1
-if [ $? -ne 0 ]; then
-    echo "FAIL: cargo check failed"
-    exit 1
+# ============================================================
+# Pre-commit hook: test → Notion update → allow commit
+# ============================================================
+# Required env vars:
+#   NOTION_TOKEN     - Notion Integration Token
+#   NOTION_PAGE_ID   - CDC 개발일지 페이지 ID (default: 3304a723f8af81179611c013d8304079)
+# ============================================================
+
+# Load .env if present
+REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+if [ -f "$REPO_ROOT/.env" ]; then
+    set -a
+    source "$REPO_ROOT/.env"
+    set +a
 fi
 
+NOTION_PAGE_ID="${NOTION_PAGE_ID:-3304a723f8af81179611c013d8304079}"
+
+# --- Step 1: cargo check ---
+echo "==> [pre-commit] Running cargo check..."
+cargo check 2>&1
+echo "==> [pre-commit] cargo check passed."
+
+# --- Step 2: cargo test ---
 echo "==> [pre-commit] Running cargo test..."
-cargo test 2>&1
-if [ $? -ne 0 ]; then
+TEST_OUTPUT=$(cargo test 2>&1)
+echo "$TEST_OUTPUT"
+
+# Extract test summary
+TEST_SUMMARY=$(echo "$TEST_OUTPUT" | grep "^test result:" | tail -1)
+PASSED=$(echo "$TEST_SUMMARY" | grep -oE '[0-9]+ passed' | grep -oE '[0-9]+')
+FAILED=$(echo "$TEST_SUMMARY" | grep -oE '[0-9]+ failed' | grep -oE '[0-9]+')
+
+if [ "${FAILED:-0}" != "0" ]; then
     echo "FAIL: tests failed"
     exit 1
 fi
 
-echo "==> [pre-commit] All checks passed."
+echo "==> [pre-commit] All ${PASSED:-0} tests passed."
+
+# --- Step 3: Update Notion (best-effort, non-blocking) ---
+if [ -z "${NOTION_TOKEN:-}" ]; then
+    echo "==> [pre-commit] NOTION_TOKEN not set, skipping Notion update."
+else
+    echo "==> [pre-commit] Updating Notion..."
+
+    COMMIT_MSG=$(git log --format='%s' -1 HEAD 2>/dev/null || echo "new commit")
+    BRANCH=$(git branch --show-current 2>/dev/null || echo "unknown")
+    DATE=$(date '+%Y-%m-%d %H:%M')
+    CHANGED_FILES=$(git diff --cached --stat | tail -1 | sed 's/^ *//')
+
+    # Build the block to append as a child of the Notion page
+    # Using Notion API v1 - append block children
+    BLOCK_JSON=$(cat <<JSONEOF
+{
+  "children": [
+    {
+      "object": "block",
+      "type": "callout",
+      "callout": {
+        "rich_text": [
+          {
+            "type": "text",
+            "text": {
+              "content": "[${DATE}] ${COMMIT_MSG}\nTests: ${PASSED:-0} passed | Branch: ${BRANCH}\n${CHANGED_FILES}"
+            }
+          }
+        ],
+        "icon": { "type": "emoji", "emoji": "✅" },
+        "color": "green_background"
+      }
+    }
+  ]
+}
+JSONEOF
+)
+
+    # Append to Notion page (best-effort, don't block commit on failure)
+    HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
+        -X PATCH \
+        "https://api.notion.com/v1/blocks/${NOTION_PAGE_ID}/children" \
+        -H "Authorization: Bearer ${NOTION_TOKEN}" \
+        -H "Content-Type: application/json" \
+        -H "Notion-Version: 2022-06-28" \
+        -d "$BLOCK_JSON" 2>/dev/null || echo "000")
+
+    if [ "$HTTP_CODE" = "200" ]; then
+        echo "==> [pre-commit] Notion updated successfully."
+    else
+        echo "==> [pre-commit] Notion update failed (HTTP ${HTTP_CODE}), continuing anyway."
+    fi
+fi
+
+echo "==> [pre-commit] All checks passed. Proceeding with commit."

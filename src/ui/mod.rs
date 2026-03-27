@@ -190,6 +190,11 @@ fn set_cursor_for_ime(frame: &mut Frame, pane: &Pane, outer_rect: Rect) {
 }
 
 
+/// Check if a pane is blocked (needs permission / waiting for input).
+pub fn is_pane_blocked(pane: &Pane) -> bool {
+    detect_pane_alert(pane) == PaneAlert::NeedsPermission
+}
+
 /// Build orchestrator title with voice state suffix.
 fn voice_title(base: &str, voice_state: &VoiceState, correcting: bool) -> String {
     if correcting {

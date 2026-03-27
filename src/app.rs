@@ -226,7 +226,9 @@ pub fn run(restore_session: Option<crate::session::Session>) -> Result<(), Box<d
                         route_text(raw_text, &mut orchestrator, &mut workers);
                     }
                     // Start correction via orchestrator Claude
-                    if orchestrator.pane.status == PaneStatus::Running {
+                    // Skip if orchestrator is blocked on permission prompt
+                    let orch_blocked = ui::is_pane_blocked(&orchestrator.pane);
+                    if orchestrator.pane.status == PaneStatus::Running && !orch_blocked {
                         let prompt = format_correction_prompt(&text);
                         let _ = orchestrator.write_to_pty(format!("{}\n", prompt).as_bytes());
                         correction_state = CorrectionState::WaitingForResponse {
@@ -261,9 +263,14 @@ pub fn run(restore_session: Option<crate::session::Session>) -> Result<(), Box<d
             let ceiling_hit = Instant::now() >= hard_ceiling;
 
             if quiescent || ceiling_hit {
-                // Extract corrected text from orchestrator grid
+                // Extract corrected text: sentinels → heuristic → raw fallback
                 let corrected = orchestrator.pane.grid
                     .extract_between_markers("[CDC_CORRECT]", "[/CDC_CORRECT]")
+                    .or_else(|| {
+                        // Heuristic: try to find a line in grid that differs from the prompt
+                        let all = orchestrator.pane.grid.extract_all_text();
+                        heuristic_extract_correction(&all, raw_text)
+                    })
                     .unwrap_or_else(|| raw_text.clone());
 
                 route_text(&corrected, &mut orchestrator, &mut workers);
@@ -988,6 +995,27 @@ fn dump_grid_debug(orchestrator: &ManagedPane, workers: &[ManagedPane], active: 
     let _ = writeln!(f, "\nDump complete.");
 }
 
+/// Heuristic extraction: find a line in grid output that looks like a corrected version.
+/// Skips lines that match the prompt or are clearly UI chrome.
+fn heuristic_extract_correction(grid_text: &str, raw_text: &str) -> Option<String> {
+    let prompt_fragment = raw_text.trim();
+    for line in grid_text.lines().rev() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() { continue; }
+        if trimmed.len() < 3 { continue; }
+        // Skip lines that are the raw text itself or the prompt
+        if trimmed == prompt_fragment { continue; }
+        if trimmed.contains("음성 명령") && trimmed.contains("보정") { continue; }
+        if trimmed.contains("[CDC_CORRECT]") { continue; }
+        // Skip typical Claude UI chrome
+        if trimmed.starts_with('>') || trimmed.starts_with('❯') { continue; }
+        if trimmed.starts_with("```") { continue; }
+        // This line looks like a correction response
+        return Some(trimmed.to_string());
+    }
+    None
+}
+
 /// Route text to worker (if pattern matches) or orchestrator.
 fn route_text(text: &str, orchestrator: &mut ManagedPane, workers: &mut [ManagedPane]) {
     if let Some((worker_idx, content)) = parse_worker_route(text) {
@@ -1080,4 +1108,55 @@ fn common_prefix(strings: &[String]) -> String {
         }
     }
     first[..len].to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_format_correction_prompt() {
+        let prompt = format_correction_prompt("워커 일에게 십을 넘겨");
+        assert!(prompt.contains("[CDC_CORRECT]"));
+        assert!(prompt.contains("워커 일에게 십을 넘겨"));
+        assert!(prompt.contains("보정"));
+    }
+
+    #[test]
+    fn test_parse_worker_route_korean_number() {
+        let result = parse_worker_route("워커 1에게 테스트 해");
+        assert_eq!(result, Some((0, "테스트 해".to_string())));
+    }
+
+    #[test]
+    fn test_parse_worker_route_digit() {
+        let result = parse_worker_route("워커 2번에 빌드 실행");
+        assert_eq!(result, Some((1, "빌드 실행".to_string())));
+    }
+
+    #[test]
+    fn test_parse_worker_route_no_match() {
+        let result = parse_worker_route("빌드해줘");
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_parse_worker_route_korean_word_number() {
+        let result = parse_worker_route("워커 일에게 코드 작성해");
+        assert_eq!(result, Some((0, "코드 작성해".to_string())));
+    }
+
+    #[test]
+    fn test_heuristic_extract_correction() {
+        let grid = "❯ 다음 음성 명령의 보정\n워커 1에게 10을 넘겨\n❯";
+        let result = heuristic_extract_correction(grid, "워커 일에게 십을 넘겨");
+        assert_eq!(result, Some("워커 1에게 10을 넘겨".to_string()));
+    }
+
+    #[test]
+    fn test_heuristic_extract_no_match() {
+        let grid = "❯ prompt text\n❯";
+        let result = heuristic_extract_correction(grid, "워커 일에게 십을 넘겨");
+        assert_eq!(result, None);
+    }
 }
