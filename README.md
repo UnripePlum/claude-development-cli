@@ -1,138 +1,236 @@
-# CDC — Claude Development CLI
+<div align="center">
 
-Multi-session Claude Code orchestrator TUI built in Rust.
+<h1>CDC</h1>
+<p><b>Orchestrate multiple Claude Code sessions from a single terminal.</b></p>
 
-One terminal, multiple Claude Code sessions. Voice commands route tasks to workers.
+<p>
+  <a href="#why"><strong>Why</strong></a> ·
+  <a href="#features"><strong>Features</strong></a> ·
+  <a href="#getting-started"><strong>Getting Started</strong></a> ·
+  <a href="#usage"><strong>Usage</strong></a> ·
+  <a href="#architecture"><strong>Architecture</strong></a>
+</p>
+
+<p>
+
+[![Rust](https://img.shields.io/badge/Rust-edition%202024-f74c00?logo=rust&logoColor=white)](https://www.rust-lang.org/)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Stars](https://img.shields.io/github/stars/UnripePlum/claude-development-cli)](https://github.com/UnripePlum/claude-development-cli/stargazers)
+
+</p>
+
+</div>
+
+<br />
+
+```
+┌──────────────────┬──────────────────┬──────────────────┐
+│                  │                  │                  │
+│  Worker 1        │  Worker 2        │  Worker 3        │  80%
+│  claude          │  claude          │  claude          │
+│                  │                  │                  │
+├──────────────────┴──────────────────┴──────────────────┤
+│                                                        │
+│  Orchestrator                                     20%  │
+│  claude                                                │
+│                                                        │
+└────────────────────────────────────────────────────────┘
+```
+
+<br />
+
+## Why
+
+AI-assisted development rarely fits in one terminal. You might want one Claude planning architecture while another writes tests, a third refactors a module, and a fourth handles docs — all on the same codebase at the same time.
+
+CDC gives you a single terminal that acts as a control plane: one orchestrator coordinates N workers, voice commands route tasks hands-free, and smart alerts surface permission requests before they block progress.
 
 ## Features
 
-### Multi-Session Orchestration
-- Orchestrator + N worker panes in a single terminal
-- Horizontal tiling (workers top 80%, orchestrator bottom 20%)
-- Mouse click / Ctrl+1~9 for pane switching
-- Ctrl+N to add workers with fuzzy directory search
-- Ctrl+Z fullscreen toggle
+<details open>
+<summary><b>Multi-Session Orchestration</b></summary>
 
-### Voice Input (Phase 4)
-- **Ctrl+R** toggle: start/stop microphone recording
-- whisper-rs Large-v3 model — local-only Korean STT
-- Auto-downloads model (~2.9GB) on first use
-- Worker routing: "워커 1에게 테스트 해" parses and sends directly to worker 1
+- Run one orchestrator + N independent worker panes
+- Fuzzy directory picker with Tab completion when adding workers
+- Mouse click or `Ctrl+1`–`9` to switch focus
+- `Ctrl+Z` fullscreen toggle on any pane
 
-### Voice Correction (Phase 5)
-- STT text auto-corrected via orchestrator Claude
-- Sentinel markers `[CDC_CORRECT]...[/CDC_CORRECT]` for reliable extraction
-- Quiescence-based detection (500ms no output = response complete)
-- Fallback to raw STT text if correction fails
+</details>
 
-### Terminal Emulation
-- Full VTE parser: SGR, cursor movement, scroll regions, DECAWM, alt screen save/restore
-- Wide character support (Korean/CJK)
-- 10K line scrollback buffer
-- IME input support
-- 60fps rendering
+<details open>
+<summary><b>Full Terminal Emulation</b></summary>
 
-### Session Management
-- Ctrl+S save session (`~/.cdc/sessions/`)
-- `--restore <name>` to restore sessions
-- Confirmation dialogs for quit/close
+- Complete VTE parser: SGR colors, cursor movement, scroll regions, alternate screen
+- 10K-line scrollback buffer
+- Korean/CJK wide-character and IME support
+- 60 fps rendering via ratatui
 
-### Smart Alerts
-- Permission request detection (red blinking border)
-- Voice state indicators: `[REC]`, `[DL: N%]`, `[STT...]`, `[CORRECTING...]`
+</details>
 
-## Keybindings
+<details>
+<summary><b>Voice Input & Routing</b></summary>
 
-| Key | Action |
-|-----|--------|
-| Ctrl+R | Voice recording toggle |
-| Ctrl+N | Add worker |
-| Ctrl+O | Focus orchestrator |
-| Ctrl+1~9 | Focus worker N |
-| Ctrl+Z | Fullscreen toggle |
-| Ctrl+W | Close worker |
-| Ctrl+S | Save session |
-| Ctrl+Q | Quit |
-| Shift+PgUp/Down | Scrollback |
+- `Ctrl+R` toggles local microphone recording
+- Transcribed by whisper-rs Large-v3 — no audio leaves the machine
+- Speak "워커 1에게 테스트 작성해" to route commands to specific workers
+- Orchestrator auto-corrects raw STT before dispatching
 
-## Installation
+```
+Mic → cpal → whisper-rs (Large-v3) → raw STT
+  → Orchestrator: [CDC_CORRECT] corrected [/CDC_CORRECT]
+  → parse_worker_route() → Worker N PTY
+```
+
+</details>
+
+<details>
+<summary><b>Session Management</b></summary>
+
+- `Ctrl+S` saves layout and working directories to `~/.cdc/sessions/`
+- `cdc --restore <name>` recreates the exact session
+- Sessions stored as JSON, archivable
+
+</details>
+
+<details>
+<summary><b>Smart Alerts</b></summary>
+
+- Detects Claude permission prompts in any pane
+- Pane border blinks red until resolved
+- Voice state shown inline: `[REC]`, `[DL: 42%]`, `[STT...]`, `[CORRECTING...]`
+
+</details>
+
+## Getting Started
 
 ### Prerequisites
-- Rust (edition 2024)
-- cmake (for whisper-rs)
-- `claude` CLI installed and authenticated
+
+| Requirement | Install |
+|-------------|---------|
+| Rust (edition 2024) | [rustup.rs](https://rustup.rs/) |
+| cmake | Required for whisper-rs C FFI |
+| Claude Code CLI | `npm install -g @anthropic-ai/claude-code` |
+
+> [!NOTE]
+> On first voice use, the Whisper Large-v3 model (~2.9 GB) downloads automatically to `~/.cache/cdc/`.
 
 ### Build
 
 ```bash
-git clone https://github.com/UnripePlum/claude-developent-cli
-cd claude-developent-cli
+git clone https://github.com/UnripePlum/claude-development-cli
+cd claude-development-cli
 cargo build --release
 ```
 
-### Run
+Optionally add to PATH:
 
 ```bash
-./target/release/cdc
+cp target/release/cdc /usr/local/bin/
 ```
 
-### Options
+## Usage
 
-```
-cdc [OPTIONS]
-
-Options:
-  --restore <NAME>    Restore a saved session
-  --cwd <DIR>         Set working directory
-  --setup             Show setup instructions
+```bash
+cdc                          # start new session
+cdc --restore my-project     # restore saved session
+cdc --cwd ~/projects/repo    # start in specific directory
+cdc --setup                  # check environment
 ```
 
-## Environment Variables
+### Keybindings
+
+| Key | Action |
+|-----|--------|
+| `Ctrl+N` | Add worker |
+| `Ctrl+W` | Close worker |
+| `Ctrl+O` | Focus orchestrator |
+| `Ctrl+1`–`9` | Focus worker N |
+| `Ctrl+Z` | Fullscreen toggle |
+| `Ctrl+S` | Save session |
+| `Ctrl+R` | Voice recording toggle |
+| `Ctrl+Q` | Quit |
+
+### Environment Variables
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `CDC_CMD` | `claude` | Command to spawn in panes |
-| `CDC_VOICE_LOG` | — | Path to log STT results for debugging |
-| `CDC_PTY_LOG` | — | Path to log raw PTY bytes |
-| `CDC_CORRECTION_TIMEOUT_MS` | `5000` | Hard ceiling for correction wait |
-| `CDC_CORRECTION_QUIESCENCE_MS` | `500` | Output quiescence threshold |
+| `CDC_CMD` | `claude` | Command spawned in each pane |
+| `CDC_CORRECTION_TIMEOUT_MS` | `5000` | Voice correction hard ceiling |
+| `CDC_CORRECTION_QUIESCENCE_MS` | `500` | Output idle threshold |
+| `CDC_VOICE_LOG` | — | STT debug log path |
+| `CDC_PTY_LOG` | — | Raw PTY byte log |
 
 ## Architecture
 
-```
-+-------------------+-------------------+-------------------+
-|  Worker 1         |  Worker 2         |  Worker 3         |  80%
-|  (claude)         |  (claude)         |  (claude)         |
-+-----------------------------------------------------------+
-|  Orchestrator (claude)                                     |  20%
-|  Ctrl+R -> STT -> Correction -> Worker Routing            |
-+-----------------------------------------------------------+
+```mermaid
+graph TD
+    subgraph Event Loop
+        TE[Terminal Events<br/>crossterm] --> ML[Main Loop<br/>app.rs]
+        PO[PTY Output<br/>background threads] --> ML
+        VE[Voice Events<br/>VoiceManager] --> ML
+    end
 
-Voice Flow:
-  Mic -> cpal -> whisper-rs (Large-v3) -> STT text
-    -> Orchestrator corrects -> [CDC_CORRECT]...[/CDC_CORRECT]
-    -> parse_worker_route() -> Worker N PTY
+    ML --> UI[UI Render<br/>ratatui]
+    ML --> PTY[PTY Write<br/>portable-pty]
+
+    subgraph Voice Pipeline
+        MIC[Mic<br/>cpal] --> WHI[whisper-rs<br/>Large-v3]
+        WHI --> COR[Orchestrator<br/>Correction]
+        COR --> ROUTE[Worker<br/>Routing]
+    end
+
+    VE --> MIC
+```
+
+### Source Layout
+
+```
+src/
+├── main.rs           # CLI entry, logo, setup wizard
+├── app.rs            # Event loop, voice correction state machine
+├── session.rs        # JSON session save/load/archive
+├── event.rs          # ANSI key + SGR mouse encoding
+├── pane/
+│   ├── mod.rs        # Pane: grid + vte parser
+│   └── grid.rs       # TerminalGrid: full VTE emulator
+├── pty/
+│   ├── mod.rs        # PtyManager: spawn/write/resize/kill
+│   └── reader.rs     # Background PTY reader thread
+├── ui/
+│   ├── mod.rs        # Layout, render, dialogs, alerts
+│   └── pane_widget.rs # ratatui Widget for TerminalGrid
+└── voice/
+    ├── mod.rs        # VoiceManager state machine
+    ├── recorder.rs   # cpal audio capture
+    └── transcriber.rs # whisper-rs STT + model download
 ```
 
 ## Tech Stack
 
-- **Rust** — ratatui + crossterm TUI
-- **PTY** — portable-pty multiplexing
-- **Audio** — cpal 0.17 (CoreAudio on macOS)
-- **STT** — whisper-rs 0.16 (Large-v3, local-only)
-- **Channels** — crossbeam for non-blocking event architecture
+| Layer | Crate | Version |
+|-------|-------|---------|
+| TUI | [ratatui](https://ratatui.rs) | 0.29 |
+| Terminal I/O | [crossterm](https://github.com/crossterm-rs/crossterm) | 0.28 |
+| PTY | [portable-pty](https://docs.rs/portable-pty) | 0.8 |
+| VTE parser | [vte](https://docs.rs/vte) | 0.13 |
+| Channels | [crossbeam-channel](https://docs.rs/crossbeam-channel) | 0.5 |
+| CLI | [clap](https://clap.rs) | 4 |
+| Audio | [cpal](https://docs.rs/cpal) | 0.17 |
+| STT | [whisper-rs](https://github.com/tazz4843/whisper-rs) | 0.16 |
+| HTTP | [ureq](https://docs.rs/ureq) | 2 |
+| Serialization | [serde](https://serde.rs) + serde_json | 1 |
 
 ## Roadmap
 
-| Phase | Status | Description |
-|-------|--------|-------------|
-| Phase 1 | Done | Single PTY + VTE parser |
-| Phase 2 | Done | Multi-worker layout |
-| Phase 3 | Done | Sessions, scrollback, dialogs, DECAWM |
-| Phase 4 | Done | Voice input (whisper-rs + worker routing) |
-| Phase 5 | Done | SelfCorrector (orchestrator-based correction) |
-| Phase 6 | Planned | PromptCorrector (prompt quality improvement) |
+- [x] Single PTY + VTE parser
+- [x] Multi-worker layout (orchestrator + N workers)
+- [x] Sessions, scrollback, dialogs, DECAWM
+- [x] Voice input with whisper-rs + worker routing
+- [x] SelfCorrector (orchestrator-based STT correction)
+- [ ] PromptCorrector (prompt quality improvement before dispatch)
+
+<!-- TODO: Add screenshot/GIF of CDC in action -->
 
 ## License
 
-MIT
+[MIT](LICENSE)
