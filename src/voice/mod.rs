@@ -24,7 +24,7 @@ pub enum VoiceEvent {
 }
 
 pub struct VoiceManager {
-    state: VoiceState,
+    pub(crate) state: VoiceState,
     recorder: Option<AudioRecorder>,
     transcriber: Option<Arc<Transcriber>>,
     tx: Sender<VoiceEvent>,
@@ -44,10 +44,6 @@ impl VoiceManager {
             recording_start: None,
         };
         (mgr, rx)
-    }
-
-    pub fn state(&self) -> &VoiceState {
-        &self.state
     }
 
     /// Reset state to Idle (called when transcription completes externally).
@@ -194,7 +190,7 @@ mod tests {
     #[test]
     fn test_initial_state_is_idle() {
         let (mgr, _rx) = VoiceManager::new();
-        assert!(matches!(mgr.state(), VoiceState::Idle));
+        assert!(matches!(mgr.state, VoiceState::Idle));
     }
 
     #[test]
@@ -202,7 +198,7 @@ mod tests {
         let (mut mgr, _rx) = VoiceManager::new();
         mgr.state = VoiceState::Transcribing;
         mgr.toggle(); // should not panic
-        assert!(matches!(mgr.state(), VoiceState::Transcribing));
+        assert!(matches!(mgr.state, VoiceState::Transcribing));
     }
 
     #[test]
@@ -210,6 +206,6 @@ mod tests {
         let (mut mgr, _rx) = VoiceManager::new();
         mgr.state = VoiceState::Downloading(50, 100);
         mgr.toggle(); // should not panic
-        assert!(matches!(mgr.state(), VoiceState::Downloading(_, _)));
+        assert!(matches!(mgr.state, VoiceState::Downloading(_, _)));
     }
 }

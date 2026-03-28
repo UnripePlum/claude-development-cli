@@ -152,6 +152,7 @@ impl TerminalGrid {
     }
 
     /// Extract all visible text from the grid (full alt screen scan).
+    #[allow(dead_code)]
     pub fn extract_all_text(&self) -> String {
         let mut lines = Vec::new();
         for r in 0..self.rows as usize {
@@ -177,6 +178,7 @@ impl TerminalGrid {
     }
 
     /// Extract text between sentinel markers from the full grid.
+    #[allow(dead_code)]
     pub fn extract_between_markers(&self, start_marker: &str, end_marker: &str) -> Option<String> {
         let full = self.extract_all_text();
         let start_pos = full.find(start_marker)?;

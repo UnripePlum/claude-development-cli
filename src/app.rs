@@ -42,36 +42,6 @@ impl TextSelection {
     }
 }
 
-/// Voice correction state machine.
-enum CorrectionState {
-    Idle,
-    WaitingForResponse {
-        raw_text: String,
-        hard_ceiling: Instant,
-    },
-}
-
-fn correction_timeout_ms() -> u64 {
-    std::env::var("CDC_CORRECTION_TIMEOUT_MS")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(5000)
-}
-
-fn correction_quiescence_ms() -> u64 {
-    std::env::var("CDC_CORRECTION_QUIESCENCE_MS")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(500)
-}
-
-fn format_correction_prompt(raw: &str) -> String {
-    format!(
-        "다음 음성 명령의 오타를 보정해서 [CDC_CORRECT] 태그 안에 결과만 출력해: {}\n예시: [CDC_CORRECT]보정된 텍스트[/CDC_CORRECT]",
-        raw
-    )
-}
-
 /// Active confirmation dialog.
 #[derive(Clone, PartialEq)]
 pub enum Dialog {
@@ -250,7 +220,6 @@ pub fn run(restore_session: Option<crate::session::Session>) -> Result<(), Box<d
     // Voice input
     let (mut voice_mgr, voice_rx) = VoiceManager::new();
     let mut voice_state = VoiceState::Idle;
-    let mut correction_state = CorrectionState::Idle;
 
     // Main event loop
     loop {
@@ -303,7 +272,7 @@ pub fn run(restore_session: Option<crate::session::Session>) -> Result<(), Box<d
             let dialog_ref = &dialog;
             let fc = frame_count;
             let vs = &voice_state;
-            let correcting = false;
+            let correcting = false; // reserved for future use
             let sel_ref = &selection;
             terminal.draw(|frame| {
                 *rects_out = ui::render(frame, &orchestrator.pane, &worker_panes, &active_copy, fullscreen, fc, vs, correcting, sel_ref);
@@ -1366,27 +1335,6 @@ fn copy_to_clipboard(text: &str) {
     }
 }
 
-/// Heuristic extraction: find a line in grid output that looks like a corrected version.
-/// Skips lines that match the prompt or are clearly UI chrome.
-fn heuristic_extract_correction(grid_text: &str, raw_text: &str) -> Option<String> {
-    let prompt_fragment = raw_text.trim();
-    for line in grid_text.lines().rev() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() { continue; }
-        if trimmed.len() < 3 { continue; }
-        // Skip lines that are the raw text itself or the prompt
-        if trimmed == prompt_fragment { continue; }
-        if trimmed.contains("음성 명령") && trimmed.contains("보정") { continue; }
-        if trimmed.contains("[CDC_CORRECT]") { continue; }
-        // Skip typical Claude UI chrome
-        if trimmed.starts_with('>') || trimmed.starts_with('❯') { continue; }
-        if trimmed.starts_with("```") { continue; }
-        // This line looks like a correction response
-        return Some(trimmed.to_string());
-    }
-    None
-}
-
 /// Extract the last intent from STT text, handling corrections.
 /// e.g. "사과를 만들어 아니 바나나를 만들어" → "바나나를 만들어"
 fn extract_last_intent(text: &str) -> String {
@@ -1511,14 +1459,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_format_correction_prompt() {
-        let prompt = format_correction_prompt("워커 일에게 십을 넘겨");
-        assert!(prompt.contains("[CDC_CORRECT]"));
-        assert!(prompt.contains("워커 일에게 십을 넘겨"));
-        assert!(prompt.contains("보정"));
-    }
-
-    #[test]
     fn test_parse_worker_route_korean_number() {
         let result = parse_worker_route("워커 1에게 테스트 해");
         assert_eq!(result, Some((0, "테스트 해".to_string())));
@@ -1542,17 +1482,4 @@ mod tests {
         assert_eq!(result, Some((0, "코드 작성해".to_string())));
     }
 
-    #[test]
-    fn test_heuristic_extract_correction() {
-        let grid = "❯ 다음 음성 명령의 보정\n워커 1에게 10을 넘겨\n❯";
-        let result = heuristic_extract_correction(grid, "워커 일에게 십을 넘겨");
-        assert_eq!(result, Some("워커 1에게 10을 넘겨".to_string()));
-    }
-
-    #[test]
-    fn test_heuristic_extract_no_match() {
-        let grid = "❯ prompt text\n❯";
-        let result = heuristic_extract_correction(grid, "워커 일에게 십을 넘겨");
-        assert_eq!(result, None);
-    }
 }
