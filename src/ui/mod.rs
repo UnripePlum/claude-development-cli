@@ -28,14 +28,20 @@ pub struct Layout {
 /// - 0 workers: orchestrator fills the entire area.
 /// - 1+ workers: workers tile horizontally in the top ~80%, orchestrator occupies the bottom ~20%.
 pub fn compute_layout(area: Rect, num_workers: usize) -> Layout {
+    let orch_h = if num_workers == 0 {
+        // No workers: orchestrator takes bottom ~40%, top area is empty
+        (area.height * 40 / 100).max(8).min(area.height)
+    } else {
+        (area.height * 20 / 100).max(6).min(area.height)
+    };
+
     if num_workers == 0 {
+        let orch_rect = Rect::new(area.x, area.y + area.height.saturating_sub(orch_h), area.width, orch_h);
         return Layout {
             worker_rects: vec![],
-            orch_rect: area,
+            orch_rect,
         };
     }
-
-    let orch_h = (area.height * 20 / 100).max(6).min(area.height);
     let worker_h = area.height.saturating_sub(orch_h);
     let orch_rect = Rect::new(area.x, area.y + worker_h, area.width, orch_h);
 
