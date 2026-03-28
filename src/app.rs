@@ -278,6 +278,7 @@ pub fn run(restore_session: Option<crate::session::Session>) -> Result<(), Box<d
                         route_text(&final_text, &mut orchestrator, &mut workers);
                     }
                     voice_state = VoiceState::Idle;
+                    voice_mgr.reset_to_idle();
                 }
                 VoiceEvent::StateChanged(state) => {
                     voice_state = state;
@@ -287,6 +288,7 @@ pub fn run(restore_session: Option<crate::session::Session>) -> Result<(), Box<d
                 }
                 VoiceEvent::Error(msg) => {
                     voice_state = VoiceState::Error(msg);
+                    voice_mgr.reset_to_idle();
                 }
             }
         }

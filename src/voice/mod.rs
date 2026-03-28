@@ -50,6 +50,11 @@ impl VoiceManager {
         &self.state
     }
 
+    /// Reset state to Idle (called when transcription completes externally).
+    pub fn reset_to_idle(&mut self) {
+        self.state = VoiceState::Idle;
+    }
+
     pub fn toggle(&mut self) {
         match &self.state {
             VoiceState::Idle => self.start_recording(),
