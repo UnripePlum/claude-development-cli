@@ -154,29 +154,40 @@ pub fn render(
 }
 
 /// Render a centered input overlay for cwd entry with optional suggestions.
-pub fn render_cwd_input(frame: &mut Frame, input: &str, suggestions: &[String]) {
-    use ratatui::widgets::Paragraph;
+pub fn render_cwd_input(frame: &mut Frame, input: &str, suggestions: &[String], selected_idx: usize) {
+    use ratatui::text::{Line, Span};
 
     let area = frame.area();
     let width = 60u16.min(area.width.saturating_sub(4));
     let x = (area.width.saturating_sub(width)) / 2;
     let y = area.height / 2;
-    let sugg_lines = suggestions.len() as u16;
-    let height = 3 + sugg_lines; // input box + suggestion lines
+    let sugg_lines = suggestions.len().min(8) as u16;
+    let height = 3 + sugg_lines;
     let rect = Rect::new(x, y, width, height);
 
-    // Build display text
-    let mut text = format!("cwd (Tab=complete, empty=inherit): {}_", input);
-    for s in suggestions {
-        text.push_str(&format!("\n  {}", s));
+    let mut lines = vec![
+        Line::from(format!("cwd (Tab=cycle, Enter=confirm): {}_", input)),
+    ];
+    for (i, s) in suggestions.iter().enumerate().take(8) {
+        if i == selected_idx {
+            lines.push(Line::from(Span::styled(
+                format!(" > {}", s),
+                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+            )));
+        } else {
+            lines.push(Line::from(Span::styled(
+                format!("   {}", s),
+                Style::default().fg(Color::Gray),
+            )));
+        }
     }
 
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Yellow))
         .title("New Worker");
-    let paragraph = Paragraph::new(text).block(block);
-    frame.render_widget(ratatui::widgets::Clear, rect);
+    let paragraph = Paragraph::new(lines).block(block);
+    frame.render_widget(Clear, rect);
     frame.render_widget(paragraph, rect);
 }
 

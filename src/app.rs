@@ -321,7 +321,7 @@ pub fn run(restore_session: Option<crate::session::Session>) -> Result<(), Box<d
             terminal.draw(|frame| {
                 *rects_out = ui::render(frame, &orchestrator.pane, &worker_panes, &active_copy, fullscreen, fc, vs, correcting, sel_ref);
                 if let Some(input) = cwd_ref {
-                    ui::render_cwd_input(frame, input, sugg_ref);
+                    ui::render_cwd_input(frame, input, sugg_ref, cwd_suggestion_idx);
                 }
                 if *dialog_ref != Dialog::None {
                     ui::render_dialog(frame, dialog_ref);
