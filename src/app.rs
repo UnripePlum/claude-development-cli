@@ -738,22 +738,24 @@ pub fn run(restore_session: Option<crate::session::Session>) -> Result<(), Box<d
                                 }
                             }
                             _ => {
-                                // Forward other mouse events (scroll, etc.) to PTY
-                                if let Some((_, rect)) = pane_rects.iter().find(|(ap, _)| *ap == active) {
-                                    let inner = ui::inner_rect(*rect);
-                                    if mouse.column >= inner.x && mouse.column < inner.x + inner.width
-                                        && mouse.row >= inner.y && mouse.row < inner.y + inner.height
-                                    {
-                                        let adjusted = MouseEvent {
-                                            kind: mouse.kind,
-                                            column: mouse.column - inner.x,
-                                            row: mouse.row - inner.y,
-                                            modifiers: mouse.modifiers,
-                                        };
-                                        let mp = active_pane_mut(&mut orchestrator, &mut workers, &active);
-                                        if mp.pane.status == PaneStatus::Running {
-                                            let bytes = encode_mouse(adjusted);
-                                            if !bytes.is_empty() { let _ = mp.pty.write(&bytes); }
+                                // Only forward scroll events to PTY — ignore moved/other
+                                if matches!(mouse.kind, MouseEventKind::ScrollUp | MouseEventKind::ScrollDown) {
+                                    if let Some((_, rect)) = pane_rects.iter().find(|(ap, _)| *ap == active) {
+                                        let inner = ui::inner_rect(*rect);
+                                        if mouse.column >= inner.x && mouse.column < inner.x + inner.width
+                                            && mouse.row >= inner.y && mouse.row < inner.y + inner.height
+                                        {
+                                            let adjusted = MouseEvent {
+                                                kind: mouse.kind,
+                                                column: mouse.column - inner.x,
+                                                row: mouse.row - inner.y,
+                                                modifiers: mouse.modifiers,
+                                            };
+                                            let mp = active_pane_mut(&mut orchestrator, &mut workers, &active);
+                                            if mp.pane.status == PaneStatus::Running {
+                                                let bytes = encode_mouse(adjusted);
+                                                if !bytes.is_empty() { let _ = mp.pty.write(&bytes); }
+                                            }
                                         }
                                     }
                                 }
