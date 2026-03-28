@@ -121,6 +121,17 @@ pub fn render(
     let layout = compute_layout(frame.area(), worker_panes.len());
     let mut rects = Vec::new();
 
+    // Show hint when no workers exist
+    if worker_panes.is_empty() {
+        let area = frame.area();
+        let hint_y = area.height.saturating_sub(layout.orch_rect.height) / 2;
+        let hint = Paragraph::new("Press Ctrl+N to add a new worker")
+            .style(Style::default().fg(Color::DarkGray))
+            .alignment(ratatui::layout::Alignment::Center);
+        let hint_rect = Rect::new(area.x, hint_y, area.width, 1);
+        frame.render_widget(hint, hint_rect);
+    }
+
     for (i, pane) in worker_panes.iter().enumerate() {
         let rect = layout.worker_rects[i];
         let focused = *active == ActivePane::Worker(i);
