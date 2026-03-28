@@ -24,43 +24,45 @@
 <br />
 
 ```
-┌──────────────────┬──────────────────┬──────────────────┐
-│                  │                  │                  │
-│  Worker 1        │  Worker 2        │  Worker 3        │  80%
-│  claude          │  claude          │  claude          │
-│                  │                  │                  │
-├──────────────────┴──────────────────┴──────────────────┤
-│                                                        │
-│  Orchestrator                                     20%  │
-│  claude                                                │
-│                                                        │
-└────────────────────────────────────────────────────────┘
+┌──────────────────┬──────────────────┬──────────────[X]─┐
+│                  │                  │                   │
+│  Pane 1          │  Pane 2          │  Pane 3           │  80%
+│  claude          │  claude          │  /bin/zsh         │
+│                  │                  │                   │
+├──────────────────┴──────────────────┴───────────────────┤
+│                                                         │
+│  Orchestrator — Ctrl+R: voice                      20%  │
+│  claude                                                 │
+│                                                         │
+└─────────────────────────────────────────────────────────┘
 ```
 
 <br />
 
 ## Why
 
-AI-assisted development rarely fits in one terminal. You might want one Claude planning architecture while another writes tests, a third refactors a module, and a fourth handles docs — all on the same codebase at the same time.
+AI-assisted development rarely fits in one terminal. You might want one Claude planning architecture while another writes tests, a third refactors a module, and a plain shell runs builds — all on the same codebase at the same time.
 
-CDC gives you a single terminal that acts as a control plane: one orchestrator coordinates N workers, voice commands route tasks hands-free, and smart alerts surface permission requests before they block progress.
+CDC gives you a single terminal that acts as a control plane: one orchestrator coordinates N panes, voice commands route tasks hands-free, and smart alerts surface permission requests before they block progress.
 
 ## Features
 
 <details open>
-<summary><b>Multi-Session Orchestration</b></summary>
+<summary><b>Multi-pane orchestration</b></summary>
 
-- Run one orchestrator + N independent worker panes
-- Fuzzy directory picker with Tab completion when adding workers
+- One orchestrator + N independent panes (Claude Code or plain terminal)
+- 3-step pane creation: directory picker → Claude/Terminal mode → permission mode
+- Fuzzy directory search with VS Code-style ↑↓/Tab picker
 - Mouse click or `Ctrl+1`–`9` to switch focus
-- `Ctrl+Z` fullscreen toggle on any pane
+- `Ctrl+Z` fullscreen toggle, `[X]` close button on each pane
+- Mouse drag text selection with clipboard copy
 
 </details>
 
 <details open>
-<summary><b>Full Terminal Emulation</b></summary>
+<summary><b>Full terminal emulation</b></summary>
 
-- Complete VTE parser: SGR colors, cursor movement, scroll regions, alternate screen
+- Complete VTE parser: SGR colors, cursor movement, scroll regions, DECAWM, alternate screen save/restore
 - 10K-line scrollback buffer
 - Korean/CJK wide-character and IME support
 - 60 fps rendering via ratatui
@@ -68,23 +70,24 @@ CDC gives you a single terminal that acts as a control plane: one orchestrator c
 </details>
 
 <details>
-<summary><b>Voice Input & Routing</b></summary>
+<summary><b>Voice input and routing</b></summary>
 
 - `Ctrl+R` toggles local microphone recording
-- Transcribed by whisper-rs Large-v3 — no audio leaves the machine
-- Speak "워커 1에게 테스트 작성해" to route commands to specific workers
-- Orchestrator auto-corrects raw STT before dispatching
+- Transcribed by faster-whisper (ghost613/faster-whisper-large-v3-turbo-korean) — no audio leaves the machine
+- Editable confirmation dialog before execution — fix STT errors, then Enter to send
+- Speak "페인 1에게 테스트 작성해" to route commands to specific panes
+- Correction detection: "아니 그거 말고 빌드해" extracts only the final intent
+- Voice CDC commands: "새 페인 만들어" opens the pane creation dialog
 
 ```
-Mic → cpal → whisper-rs (Large-v3) → raw STT
-  → Orchestrator: [CDC_CORRECT] corrected [/CDC_CORRECT]
-  → parse_worker_route() → Worker N PTY
+Mic → cpal → faster-whisper (Korean) → editable confirm dialog
+  → extract_last_intent() → parse_worker_route() → Pane N PTY
 ```
 
 </details>
 
 <details>
-<summary><b>Session Management</b></summary>
+<summary><b>Session management</b></summary>
 
 - `Ctrl+S` saves layout and working directories to `~/.cdc/sessions/`
 - `cdc --restore <name>` recreates the exact session
@@ -93,26 +96,23 @@ Mic → cpal → whisper-rs (Large-v3) → raw STT
 </details>
 
 <details>
-<summary><b>Smart Alerts</b></summary>
+<summary><b>Smart alerts</b></summary>
 
 - Detects Claude permission prompts in any pane
 - Pane border blinks red until resolved
-- Voice state shown inline: `[REC]`, `[DL: 42%]`, `[STT...]`, `[CORRECTING...]`
+- Voice state shown inline: `[REC] Ctrl+R: stop`, `[STT...]`
+- Interactive confirm dialogs with mouse click and ↑↓/Enter
 
 </details>
 
-## Getting Started
+## Getting started
 
 ### Prerequisites
 
 | Requirement | Install |
 |-------------|---------|
 | Rust (edition 2024) | [rustup.rs](https://rustup.rs/) |
-| cmake | Required for whisper-rs C FFI |
 | Claude Code CLI | `npm install -g @anthropic-ai/claude-code` |
-
-> [!NOTE]
-> On first voice use, the Whisper Large-v3 model (~2.9 GB) downloads automatically to `~/.cache/cdc/`.
 
 ### Build
 
@@ -122,41 +122,44 @@ cd claude-development-cli
 cargo build --release
 ```
 
-Optionally add to PATH:
+### Voice setup (optional)
 
 ```bash
-cp target/release/cdc /usr/local/bin/
+python3 -m venv .venv
+source .venv/bin/activate
+pip install faster-whisper
 ```
+
+The Korean STT model (~2 GB) downloads automatically on first `Ctrl+R` use.
 
 ## Usage
 
 ```bash
-cdc                          # start new session
-cdc --restore my-project     # restore saved session
-cdc --cwd ~/projects/repo    # start in specific directory
-cdc --setup                  # check environment
+./target/release/cdc                  # start new session
+./target/release/cdc --restore proj   # restore saved session
+./target/release/cdc --cwd ~/repo     # start in specific directory
+./target/release/cdc --setup          # check environment
 ```
 
 ### Keybindings
 
 | Key | Action |
 |-----|--------|
-| `Ctrl+N` | Add worker |
-| `Ctrl+W` | Close worker |
+| `Ctrl+N` | Add pane (3-step: directory → Claude/Terminal → permissions) |
+| `Ctrl+W` | Close focused pane |
 | `Ctrl+O` | Focus orchestrator |
-| `Ctrl+1`–`9` | Focus worker N |
+| `Ctrl+1`–`9` | Focus pane N |
 | `Ctrl+Z` | Fullscreen toggle |
 | `Ctrl+S` | Save session |
 | `Ctrl+R` | Voice recording toggle |
 | `Ctrl+Q` | Quit |
+| `Shift+PgUp/Down` | Scrollback |
 
-### Environment Variables
+### Environment variables
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `CDC_CMD` | `claude` | Command spawned in each pane |
-| `CDC_CORRECTION_TIMEOUT_MS` | `5000` | Voice correction hard ceiling |
-| `CDC_CORRECTION_QUIESCENCE_MS` | `500` | Output idle threshold |
+| `CDC_CMD` | `claude` | Command spawned in Claude panes |
 | `CDC_VOICE_LOG` | — | STT debug log path |
 | `CDC_PTY_LOG` | — | Raw PTY byte log |
 
@@ -174,20 +177,21 @@ graph TD
     ML --> PTY[PTY Write<br/>portable-pty]
 
     subgraph Voice Pipeline
-        MIC[Mic<br/>cpal] --> WHI[whisper-rs<br/>Large-v3]
-        WHI --> COR[Orchestrator<br/>Correction]
-        COR --> ROUTE[Worker<br/>Routing]
+        MIC[Mic<br/>cpal] --> WHI[faster-whisper<br/>Korean model]
+        WHI --> CONFIRM[Editable<br/>confirm dialog]
+        CONFIRM --> INTENT[Intent<br/>extraction]
+        INTENT --> ROUTE[Pane<br/>routing]
     end
 
     VE --> MIC
 ```
 
-### Source Layout
+### Source layout
 
 ```
 src/
 ├── main.rs           # CLI entry, logo, setup wizard
-├── app.rs            # Event loop, voice correction state machine
+├── app.rs            # Event loop, intent extraction, pane routing
 ├── session.rs        # JSON session save/load/archive
 ├── event.rs          # ANSI key + SGR mouse encoding
 ├── pane/
@@ -201,14 +205,16 @@ src/
 │   └── pane_widget.rs # ratatui Widget for TerminalGrid
 └── voice/
     ├── mod.rs        # VoiceManager state machine
-    ├── recorder.rs   # cpal audio capture
-    └── transcriber.rs # whisper-rs STT + model download
+    ├── recorder.rs   # cpal audio capture + 16kHz resampling
+    └── transcriber.rs # faster-whisper Python subprocess
+scripts/
+└── stt.py            # faster-whisper STT backend
 ```
 
-## Tech Stack
+## Tech stack
 
-| Layer | Crate | Version |
-|-------|-------|---------|
+| Layer | Crate/Tool | Version |
+|-------|------------|---------|
 | TUI | [ratatui](https://ratatui.rs) | 0.29 |
 | Terminal I/O | [crossterm](https://github.com/crossterm-rs/crossterm) | 0.28 |
 | PTY | [portable-pty](https://docs.rs/portable-pty) | 0.8 |
@@ -216,20 +222,24 @@ src/
 | Channels | [crossbeam-channel](https://docs.rs/crossbeam-channel) | 0.5 |
 | CLI | [clap](https://clap.rs) | 4 |
 | Audio | [cpal](https://docs.rs/cpal) | 0.17 |
-| STT | [whisper-rs](https://github.com/tazz4843/whisper-rs) | 0.16 |
-| HTTP | [ureq](https://docs.rs/ureq) | 2 |
+| STT | [faster-whisper](https://github.com/SYSTRAN/faster-whisper) | Python |
 | Serialization | [serde](https://serde.rs) + serde_json | 1 |
 
 ## Roadmap
 
 - [x] Single PTY + VTE parser
-- [x] Multi-worker layout (orchestrator + N workers)
-- [x] Sessions, scrollback, dialogs, DECAWM
-- [x] Voice input with whisper-rs + worker routing
-- [x] SelfCorrector (orchestrator-based STT correction)
-- [ ] PromptCorrector (prompt quality improvement before dispatch)
-
-<!-- TODO: Add screenshot/GIF of CDC in action -->
+- [x] Multi-pane layout (orchestrator + N panes)
+- [x] Sessions, scrollback, DECAWM, alt screen save/restore
+- [x] Voice input with faster-whisper + pane routing
+- [x] Editable STT confirmation dialog
+- [x] Intent correction ("아니 그거 말고" detection)
+- [x] Voice CDC commands ("새 페인 만들어")
+- [x] Mouse drag text selection + clipboard
+- [x] 3-step pane creation (Claude/Terminal + permissions)
+- [x] Interactive dialogs (mouse click + keyboard)
+- [x] [X] close button on panes
+- [ ] Pane drag resize
+- [ ] Custom pane names
 
 ## License
 
