@@ -510,7 +510,7 @@ pub fn run(restore_session: Option<crate::session::Session>) -> Result<(), Box<d
                                                 let wi = ui::inner_rect(*rect);
                                                 if let Ok(mp) = ManagedPane::spawn(
                                                     next_id,
-                                                    format!("term-{}", next_id),
+                                                    format!("pane-{}", next_id),
                                                     &shell,
                                                     wi.width,
                                                     wi.height,
@@ -543,7 +543,7 @@ pub fn run(restore_session: Option<crate::session::Session>) -> Result<(), Box<d
                                             };
                                             if let Ok(mp) = ManagedPane::spawn_with_args(
                                                 next_id,
-                                                format!("worker-{}", next_id),
+                                                format!("pane-{}", next_id),
                                                 &cmd,
                                                 args,
                                                 wi.width,

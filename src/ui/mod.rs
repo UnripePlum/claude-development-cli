@@ -105,7 +105,7 @@ pub fn render(
                         pane,
                         area,
                         true,
-                        &format!("Worker {} [fullscreen]", idx + 1),
+                        &format!("Pane {} [fullscreen]", idx + 1),
                         frame_count,
                         sel,
                         true,
@@ -125,7 +125,7 @@ pub fn render(
     if worker_panes.is_empty() {
         let area = frame.area();
         let hint_y = area.height.saturating_sub(layout.orch_rect.height) / 2;
-        let hint = Paragraph::new("Press Ctrl+N to add a new worker")
+        let hint = Paragraph::new("Press Ctrl+N to add a new pane")
             .style(Style::default().fg(Color::DarkGray))
             .alignment(ratatui::layout::Alignment::Center);
         let hint_rect = Rect::new(area.x, hint_y, area.width, 1);
@@ -136,7 +136,7 @@ pub fn render(
         let rect = layout.worker_rects[i];
         let focused = *active == ActivePane::Worker(i);
         let sel = if selection.active && selection.pane == ActivePane::Worker(i) { Some(selection) } else { None };
-        render_pane(frame, pane, rect, focused, &format!("Worker {}", i + 1), frame_count, sel, true);
+        render_pane(frame, pane, rect, focused, &format!("Pane {}", i + 1), frame_count, sel, true);
         rects.push((ActivePane::Worker(i), rect));
     }
 
@@ -200,7 +200,7 @@ pub fn render_cwd_input(frame: &mut Frame, input: &str, suggestions: &[String], 
         lines.push(Line::from(Span::styled(format!("{}{}", prefix, s), style)));
     }
 
-    let title = format!("New Worker — {} match{}", suggestions.len(),
+    let title = format!("New Pane — {} match{}", suggestions.len(),
         if suggestions.len() == 1 { "" } else { "es" });
     let block = Block::default()
         .borders(Borders::ALL)
@@ -252,7 +252,7 @@ pub fn render_mode_select(frame: &mut Frame, selected: usize) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Cyan))
-        .title("Worker Type — ↑↓ select, Enter confirm, Esc cancel");
+        .title("Pane Type — ↑↓ select, Enter confirm, Esc cancel");
     let paragraph = Paragraph::new(lines).block(block);
     frame.render_widget(Clear, rect);
     frame.render_widget(paragraph, rect);
@@ -476,7 +476,7 @@ pub fn render_dialog(frame: &mut Frame, dialog: &Dialog, selected: usize) {
             let block = Block::default()
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(Color::Yellow))
-                .title(format!("Close Worker {}?", idx + 1));
+                .title(format!("Close Pane {}?", idx + 1));
             let yes_style = if selected == 0 {
                 Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
             } else {
@@ -488,7 +488,7 @@ pub fn render_dialog(frame: &mut Frame, dialog: &Dialog, selected: usize) {
                 Style::default().fg(Color::White)
             };
             let lines = vec![
-                Line::from("Worker process will be killed."),
+                Line::from("Pane process will be killed."),
                 Line::from(""),
                 Line::from(vec![
                     Span::raw("  "),
