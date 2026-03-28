@@ -1,4 +1,5 @@
 use crate::event::{encode_key, encode_mouse};
+use unicode_width::UnicodeWidthChar;
 use crate::pane::{Pane, PaneStatus};
 use crate::pty::{PtyEvent, PtyManager};
 use crate::ui::{self, ActivePane};
@@ -269,7 +270,13 @@ pub fn run(restore_session: Option<crate::session::Session>) -> Result<(), Box<d
                 VoiceEvent::Transcribed(text) => {
                     // Extract last intent (handle corrections like "아니 바나나를 만들어")
                     let final_text = extract_last_intent(&text);
-                    route_text(&final_text, &mut orchestrator, &mut workers);
+                    // Check for CDC commands before routing
+                    let lower = final_text.to_lowercase();
+                    if lower.contains("새 페인") || lower.contains("페인 만들") || lower.contains("new pane") {
+                        cwd_input = Some(String::new());
+                    } else {
+                        route_text(&final_text, &mut orchestrator, &mut workers);
+                    }
                     voice_state = VoiceState::Idle;
                 }
                 VoiceEvent::StateChanged(state) => {
@@ -1267,11 +1274,20 @@ fn extract_selection(grid: &crate::pane::TerminalGrid, sel: &TextSelection) -> S
         if let Some(row) = grid.view_row(r) {
             let col_start = if r == sr { sc as usize } else { 0 };
             let col_end = if r == er { (ec as usize) + 1 } else { row.len() };
-            let line: String = row[col_start..col_end.min(row.len())]
-                .iter()
-                .filter(|c| c.ch != '\0')
-                .map(|c| c.ch)
-                .collect();
+            let slice = &row[col_start..col_end.min(row.len())];
+            let line: String = slice.iter().enumerate().filter_map(|(i, c)| {
+                if c.ch == '\0' { return None; }
+                // Skip wide-char placeholder (prev char is wide + this is space)
+                let abs_col = col_start + i;
+                if abs_col > 0 && c.ch == ' ' {
+                    if let Some(prev) = row.get(abs_col - 1) {
+                        if prev.ch.width().unwrap_or(1) == 2 {
+                            return None;
+                        }
+                    }
+                }
+                Some(c.ch)
+            }).collect();
             lines.push(line.trim_end().to_string());
         }
     }
@@ -1321,7 +1337,10 @@ fn heuristic_extract_correction(grid_text: &str, raw_text: &str) -> Option<Strin
 /// e.g. "사과를 만들어 아니 바나나를 만들어" → "바나나를 만들어"
 fn extract_last_intent(text: &str) -> String {
     // Korean correction words that indicate "forget what I just said"
-    let correction_markers = ["아니 ", "아니야 ", "아니요 ", "취소 ", "말고 ", "그게 아니라 ", "아 아니 "];
+    let correction_markers = [
+        "아니다 ", "아니다. ", "아닌데 ", "아니 ", "아니야 ", "아니요 ",
+        "취소 ", "말고 ", "그게 아니라 ", "아 아니 ", "아 아니다 ",
+    ];
     let lower = text.to_string();
     let mut last_pos = 0;
     for marker in &correction_markers {
