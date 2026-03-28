@@ -112,9 +112,21 @@ impl ManagedPane {
         rows: u16,
         cwd: Option<&str>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
+        Self::spawn_with_args(id, name, cmd, &[], cols, rows, cwd)
+    }
+
+    fn spawn_with_args(
+        id: u32,
+        name: String,
+        cmd: &str,
+        args: &[&str],
+        cols: u16,
+        rows: u16,
+        cwd: Option<&str>,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         let (tx, rx) = crossbeam_channel::bounded(4096);
         let pane = Pane::new(id, name, cols, rows);
-        let pty = PtyManager::spawn_with_cwd(cmd, &[], cols, rows, tx, cwd)?;
+        let pty = PtyManager::spawn_with_cwd(cmd, args, cols, rows, tx, cwd)?;
         Ok(Self {
             pane,
             cwd: cwd.map(|s| s.to_string()),
@@ -222,6 +234,8 @@ pub fn run(restore_session: Option<crate::session::Session>) -> Result<(), Box<d
     let mut cwd_suggestions: Vec<String> = Vec::new();
     let mut cwd_suggestion_idx: usize = 0;
     let mut cwd_original_input: String = String::new(); // preserve user's typed text
+    let mut pending_worker_cwd: Option<Option<String>> = None; // Some = waiting for permission mode selection
+    let mut perm_selection: usize = 0; // 0 = normal, 1 = skip-permissions
     let mut selection = TextSelection::none();
     let mut dialog = Dialog::None;
     let mut frame_count: u64 = 0;
@@ -321,8 +335,9 @@ pub fn run(restore_session: Option<crate::session::Session>) -> Result<(), Box<d
             let sel_ref = &selection;
             terminal.draw(|frame| {
                 *rects_out = ui::render(frame, &orchestrator.pane, &worker_panes, &active_copy, fullscreen, fc, vs, correcting, sel_ref);
-                if let Some(input) = cwd_ref {
-                    // selected_idx for UI: 0=original (no highlight), 1+=suggestion index
+                if pending_worker_cwd.is_some() {
+                    ui::render_perm_select(frame, perm_selection);
+                } else if let Some(input) = cwd_ref {
                     let highlight_idx = if cwd_suggestion_idx == 0 { usize::MAX } else { cwd_suggestion_idx - 1 };
                     ui::render_cwd_input(frame, input, sugg_ref, highlight_idx);
                 }
@@ -428,6 +443,50 @@ pub fn run(restore_session: Option<crate::session::Session>) -> Result<(), Box<d
                                 }
                                 Dialog::None => unreachable!(),
                             }
+                        } else if pending_worker_cwd.is_some() {
+                            // Permission mode selection
+                            match key.code {
+                                KeyCode::Up | KeyCode::Down | KeyCode::Tab => {
+                                    perm_selection = 1 - perm_selection; // toggle 0/1
+                                }
+                                KeyCode::Enter => {
+                                    let cwd = pending_worker_cwd.take().unwrap();
+                                    let skip_perms = perm_selection == 1;
+                                    let new_count = workers.len() + 1;
+                                    let layout = ui::compute_layout(term_rect(&terminal), new_count);
+                                    if let Some(rect) = layout.worker_rects.last() {
+                                        let wi = ui::inner_rect(*rect);
+                                        let args: &[&str] = if skip_perms {
+                                            &["--dangerously-skip-permissions"]
+                                        } else {
+                                            &[]
+                                        };
+                                        if let Ok(mp) = ManagedPane::spawn_with_args(
+                                            next_id,
+                                            format!("worker-{}", next_id),
+                                            &cmd,
+                                            args,
+                                            wi.width,
+                                            wi.height,
+                                            cwd.as_deref(),
+                                        ) {
+                                            workers.push(mp);
+                                            let new_ap = ActivePane::Worker(workers.len() - 1);
+                                            switch_focus(active, new_ap, &mut orchestrator, &mut workers);
+                                            active = new_ap;
+                                            next_id += 1;
+                                            fullscreen = None;
+                                            resize_all_panes(&mut orchestrator, &mut workers, term_rect(&terminal), None);
+                                        }
+                                    }
+                                    perm_selection = 0;
+                                }
+                                KeyCode::Esc => {
+                                    pending_worker_cwd = None;
+                                    perm_selection = 0;
+                                }
+                                _ => {}
+                            }
                         } else
                         // CWD input mode: capture keys for directory path
                         if let Some(ref mut input) = cwd_input {
@@ -468,38 +527,9 @@ pub fn run(restore_session: Option<crate::session::Session>) -> Result<(), Box<d
                                     cwd_input = None;
                                     cwd_suggestions.clear();
                                     cwd_suggestion_idx = 0;
-                                    // Create worker with the entered cwd
-                                    let new_count = workers.len() + 1;
-                                    let layout =
-                                        ui::compute_layout(term_rect(&terminal), new_count);
-                                    if let Some(rect) = layout.worker_rects.last() {
-                                        let wi = ui::inner_rect(*rect);
-                                        if let Ok(mp) = ManagedPane::spawn(
-                                            next_id,
-                                            format!("worker-{}", next_id),
-                                            &cmd,
-                                            wi.width,
-                                            wi.height,
-                                            cwd.as_deref(),
-                                        ) {
-                                            workers.push(mp);
-                                            let new_ap =
-                                                ActivePane::Worker(workers.len() - 1);
-                                            switch_focus(
-                                                active, new_ap, &mut orchestrator,
-                                                &mut workers,
-                                            );
-                                            active = new_ap;
-                                            next_id += 1;
-                                            fullscreen = None;
-                                            resize_all_panes(
-                                                &mut orchestrator,
-                                                &mut workers,
-                                                term_rect(&terminal),
-                                                None,
-                                            );
-                                        }
-                                    }
+                                    // Transition to permission mode selection
+                                    pending_worker_cwd = Some(cwd);
+                                    perm_selection = 0;
                                 }
                                 KeyCode::Esc => {
                                     cwd_input = None;

@@ -205,6 +205,46 @@ pub fn render_cwd_input(frame: &mut Frame, input: &str, suggestions: &[String], 
     }
 }
 
+/// Render permission mode selection dialog.
+pub fn render_perm_select(frame: &mut Frame, selected: usize) {
+    use ratatui::text::{Line, Span};
+
+    let area = frame.area();
+    let width = 50u16.min(area.width.saturating_sub(4));
+    let height = 6u16;
+    let x = (area.width.saturating_sub(width)) / 2;
+    let y = (area.height / 3).min(area.height.saturating_sub(height));
+    let rect = Rect::new(x, y, width, height);
+
+    let options = [
+        ("Normal", "Requires permission for each action"),
+        ("Skip Permissions", "--dangerously-skip-permissions"),
+    ];
+
+    let mut lines = Vec::new();
+    for (i, (label, desc)) in options.iter().enumerate() {
+        let prefix = if i == selected { " > " } else { "   " };
+        let style = if i == selected {
+            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::White)
+        };
+        lines.push(Line::from(Span::styled(format!("{}{}", prefix, label), style)));
+        lines.push(Line::from(Span::styled(
+            format!("     {}", desc),
+            Style::default().fg(Color::DarkGray),
+        )));
+    }
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan))
+        .title("Permission Mode — ↑↓ select, Enter confirm, Esc cancel");
+    let paragraph = Paragraph::new(lines).block(block);
+    frame.render_widget(Clear, rect);
+    frame.render_widget(paragraph, rect);
+}
+
 /// Set the hardware cursor position for IME composition.
 /// Position the cursor so the OS IME overlay (Korean, Japanese, etc.)
 /// appears at the right place. We use set_cursor_position which also
