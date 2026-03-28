@@ -25,8 +25,9 @@ impl Transcriber {
     where
         F: Fn(u64, u64) + Send + 'static,
     {
-        // Verify Python and faster-whisper are available
-        let check = Command::new("python3")
+        // Verify Python and faster-whisper are available (prefer venv)
+        let python = find_python();
+        let check = Command::new(&python)
             .args(["-c", "import faster_whisper"])
             .output();
         match check {
@@ -54,8 +55,9 @@ impl Transcriber {
         // Find the stt.py script
         let script_path = find_stt_script();
 
-        // Call Python
-        let output = Command::new("python3")
+        // Call Python (prefer venv)
+        let python = find_python();
+        let output = Command::new(&python)
             .arg(&script_path)
             .arg(&wav_path)
             .output()
@@ -88,6 +90,30 @@ impl Transcriber {
 
         Ok(text)
     }
+}
+
+/// Find Python executable, preferring project venv.
+fn find_python() -> String {
+    // Check for venv next to executable
+    if let Ok(exe) = std::env::current_exe() {
+        let dir = exe.parent().unwrap_or(std::path::Path::new("."));
+        // target/release/../.venv or target/debug/../.venv
+        for ancestor in [dir, dir.parent().unwrap_or(dir)] {
+            if let Some(root) = ancestor.parent() {
+                let venv_python = root.join(".venv").join("bin").join("python3");
+                if venv_python.exists() {
+                    return venv_python.to_string_lossy().to_string();
+                }
+            }
+        }
+    }
+    // Check cwd/.venv
+    let cwd_venv = PathBuf::from(".venv/bin/python3");
+    if cwd_venv.exists() {
+        return cwd_venv.to_string_lossy().to_string();
+    }
+    // Fallback to system python
+    "python3".to_string()
 }
 
 /// Find stt.py relative to the executable or in common locations.
