@@ -1,109 +1,78 @@
 use std::io::Write;
-use std::os::unix::io::AsRawFd;
 use std::path::PathBuf;
-use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
+use std::process::Command;
 
 #[derive(Debug)]
 pub enum TranscriberError {
-    ModelDownload(String),
-    ModelLoad(String),
     Transcription(String),
+    WavWrite(String),
 }
 
 impl std::fmt::Display for TranscriberError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::ModelDownload(e) => write!(f, "Model download failed: {}", e),
-            Self::ModelLoad(e) => write!(f, "Model load failed: {}", e),
             Self::Transcription(e) => write!(f, "Transcription failed: {}", e),
+            Self::WavWrite(e) => write!(f, "WAV write failed: {}", e),
         }
     }
 }
 
-const MODEL_URL: &str = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3.bin";
-const EXPECTED_MODEL_SIZE: u64 = 3_094_623_691; // ~2.9GB ggml-large-v3.bin
-
-pub struct Transcriber {
-    ctx: WhisperContext,
-}
+pub struct Transcriber;
 
 impl Transcriber {
-    /// Create a new Transcriber, downloading the model if necessary.
-    /// `progress_fn` is called with (downloaded_bytes, total_bytes) during download.
-    pub fn new<F>(progress_fn: F) -> Result<Self, TranscriberError>
+    /// Create a new Transcriber. No model loading needed — Python handles it.
+    pub fn new<F>(_progress_fn: F) -> Result<Self, TranscriberError>
     where
         F: Fn(u64, u64) + Send + 'static,
     {
-        let model_path = model_path();
-        if !model_path.exists() {
-            download_model(&model_path, &progress_fn)?;
-        }
-
-        // Verify file size
-        if let Ok(meta) = std::fs::metadata(&model_path) {
-            let size = meta.len();
-            // Allow 5% tolerance for different model versions
-            if size < EXPECTED_MODEL_SIZE * 95 / 100 {
-                let _ = std::fs::remove_file(&model_path);
-                return Err(TranscriberError::ModelDownload(format!(
-                    "Model file corrupt ({}B, expected ~{}B). Deleted. Retry Ctrl+R.",
-                    size, EXPECTED_MODEL_SIZE
-                )));
+        // Verify Python and faster-whisper are available
+        let check = Command::new("python3")
+            .args(["-c", "import faster_whisper"])
+            .output();
+        match check {
+            Ok(output) if output.status.success() => Ok(Self),
+            Ok(output) => {
+                let err = String::from_utf8_lossy(&output.stderr);
+                Err(TranscriberError::Transcription(format!(
+                    "faster-whisper not installed. Run: pip install faster-whisper\n{}",
+                    err.trim()
+                )))
             }
+            Err(e) => Err(TranscriberError::Transcription(format!(
+                "python3 not found: {}",
+                e
+            ))),
         }
-
-        let params = WhisperContextParameters::default();
-        // Suppress whisper.cpp C library stderr output (model loading logs)
-        // which would pollute the TUI
-        let ctx = {
-            let _guard = SuppressStderr::new();
-            WhisperContext::new_with_params(
-                model_path.to_str().unwrap_or(""),
-                params,
-            )
-            .map_err(|e| TranscriberError::ModelLoad(format!("{}", e)))?
-        };
-
-        Ok(Self { ctx })
     }
 
-    /// Transcribe f32 mono 16kHz samples to Korean text.
+    /// Transcribe f32 mono 16kHz samples by writing WAV and calling Python script.
     pub fn transcribe(&self, samples: &[f32]) -> Result<String, TranscriberError> {
-        let mut params = FullParams::new(SamplingStrategy::BeamSearch { beam_size: 5, patience: 1.0 });
-        params.set_language(Some("ko"));
-        params.set_print_special(false);
-        params.set_print_progress(false);
-        params.set_print_realtime(false);
-        params.set_print_timestamps(false);
-        params.set_suppress_blank(true);
-        // Prime the model with domain-specific Korean terms for better accuracy
-        params.set_initial_prompt("워커, 오케스트레이터, 프롬프트, 코드, 테스트, 빌드, 커밋, 값, 넘겨, 실행");
+        // Write samples to a temp WAV file
+        let wav_path = std::env::temp_dir().join("cdc_voice_input.wav");
+        write_wav(&wav_path, samples, 16000)?;
 
-        // Suppress whisper.cpp stderr for entire transcription (create_state + full + segment read)
-        let _guard = SuppressStderr::new();
+        // Find the stt.py script
+        let script_path = find_stt_script();
 
-        let mut state = self.ctx.create_state()
-            .map_err(|e| TranscriberError::Transcription(format!("{}", e)))?;
+        // Call Python
+        let output = Command::new("python3")
+            .arg(&script_path)
+            .arg(&wav_path)
+            .output()
+            .map_err(|e| TranscriberError::Transcription(format!("Failed to run stt.py: {}", e)))?;
 
-        state.full(params, samples)
-            .map_err(|e| TranscriberError::Transcription(format!("{}", e)))?;
+        // Clean up temp file
+        let _ = std::fs::remove_file(&wav_path);
 
-        let num_segments = state.full_n_segments();
-
-        let mut text = String::new();
-        for i in 0..num_segments {
-            if let Some(segment) = state.get_segment(i) {
-                if let Ok(s) = segment.to_str() {
-                    let cleaned = sanitize_stt(s);
-                    if !cleaned.is_empty() {
-                        text.push_str(&cleaned);
-                        text.push(' ');
-                    }
-                }
-            }
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(TranscriberError::Transcription(format!(
+                "stt.py failed: {}",
+                stderr.trim()
+            )));
         }
 
-        let result = text.trim().to_string();
+        let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
 
         // Debug log if CDC_VOICE_LOG is set
         if let Ok(path) = std::env::var("CDC_VOICE_LOG") {
@@ -113,129 +82,79 @@ impl Transcriber {
                 .open(&path)
                 .and_then(|mut f| {
                     use std::io::Write;
-                    writeln!(f, "[STT] raw_segments={} result={:?}", num_segments, result)
+                    writeln!(f, "[STT] result={:?}", text)
                 });
         }
 
-        Ok(result)
+        Ok(text)
     }
 }
 
-fn model_path() -> PathBuf {
-    let cache = dirs::cache_dir().unwrap_or_else(|| PathBuf::from("."));
-    cache.join("cdc").join("whisper-large-v3.bin")
-}
-
-/// RAII guard that redirects stderr to /dev/null and restores on drop.
-struct SuppressStderr {
-    saved_fd: i32,
-}
-
-impl SuppressStderr {
-    fn new() -> Self {
-        unsafe {
-            let saved = libc::dup(2); // save original stderr fd
-            if let Ok(devnull) = std::fs::File::open("/dev/null") {
-                libc::dup2(devnull.as_raw_fd(), 2);
+/// Find stt.py relative to the executable or in common locations.
+fn find_stt_script() -> PathBuf {
+    // Check next to executable
+    if let Ok(exe) = std::env::current_exe() {
+        let dir = exe.parent().unwrap_or(std::path::Path::new("."));
+        let candidate = dir.join("scripts").join("stt.py");
+        if candidate.exists() {
+            return candidate;
+        }
+        // Two levels up (target/release/../scripts)
+        let candidate = dir.parent()
+            .and_then(|p| p.parent())
+            .map(|p| p.join("scripts").join("stt.py"));
+        if let Some(c) = candidate {
+            if c.exists() {
+                return c;
             }
-            Self { saved_fd: saved }
         }
     }
+    // Check cwd
+    let cwd_candidate = PathBuf::from("scripts/stt.py");
+    if cwd_candidate.exists() {
+        return cwd_candidate;
+    }
+    // Fallback: assume it's in PATH-accessible location
+    PathBuf::from("scripts/stt.py")
 }
 
-impl Drop for SuppressStderr {
-    fn drop(&mut self) {
-        unsafe {
-            libc::dup2(self.saved_fd, 2); // restore stderr
-            libc::close(self.saved_fd);
-        }
-    }
-}
-
-/// Remove whisper special tokens, control characters, and repeated artifacts.
-fn sanitize_stt(raw: &str) -> String {
-    let mut s = raw.trim().to_string();
-
-    // Remove whisper special tokens like <|startoftranscript|>, <|ko|>, [BLANK_AUDIO], etc.
-    let patterns = [
-        "<|startoftranscript|>", "<|endoftext|>", "<|notimestamps|>",
-        "<|ko|>", "<|en|>", "<|transcribe|>", "<|translate|>",
-        "[BLANK_AUDIO]", "(blank_audio)", "[MUSIC]", "(music)",
-    ];
-    for pat in &patterns {
-        s = s.replace(pat, "");
-    }
-
-    // Remove any remaining <|...|> tokens
-    while let Some(start) = s.find("<|") {
-        if let Some(end) = s[start..].find("|>") {
-            s = format!("{}{}", &s[..start], &s[start + end + 2..]);
-        } else {
-            break;
-        }
-    }
-
-    // Remove control characters (except normal whitespace)
-    s = s.chars().filter(|c| !c.is_control() || *c == ' ' || *c == '\t').collect();
-
-    // Collapse excessive whitespace
-    let mut result = String::new();
-    let mut prev_space = false;
-    for c in s.chars() {
-        if c == ' ' {
-            if !prev_space {
-                result.push(c);
-            }
-            prev_space = true;
-        } else {
-            result.push(c);
-            prev_space = false;
-        }
-    }
-
-    result.trim().to_string()
-}
-
-fn download_model<F>(path: &PathBuf, progress_fn: &F) -> Result<(), TranscriberError>
-where
-    F: Fn(u64, u64),
-{
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| TranscriberError::ModelDownload(e.to_string()))?;
-    }
-
-    let response = ureq::get(MODEL_URL)
-        .call()
-        .map_err(|e| TranscriberError::ModelDownload(e.to_string()))?;
-
-    let total = response
-        .header("Content-Length")
-        .and_then(|s| s.parse::<u64>().ok())
-        .unwrap_or(EXPECTED_MODEL_SIZE);
-
+/// Write f32 mono samples as a 16-bit PCM WAV file.
+fn write_wav(path: &PathBuf, samples: &[f32], sample_rate: u32) -> Result<(), TranscriberError> {
     let mut file = std::fs::File::create(path)
-        .map_err(|e| TranscriberError::ModelDownload(e.to_string()))?;
+        .map_err(|e| TranscriberError::WavWrite(e.to_string()))?;
 
-    let mut reader = response.into_reader();
-    let mut buf = [0u8; 65536];
-    let mut downloaded: u64 = 0;
+    let num_samples = samples.len() as u32;
+    let bytes_per_sample = 2u16; // 16-bit PCM
+    let data_size = num_samples * bytes_per_sample as u32;
+    let file_size = 36 + data_size;
 
-    loop {
-        let n = reader
-            .read(&mut buf)
-            .map_err(|e| TranscriberError::ModelDownload(e.to_string()))?;
-        if n == 0 {
-            break;
-        }
-        file.write_all(&buf[..n])
-            .map_err(|e| TranscriberError::ModelDownload(e.to_string()))?;
-        downloaded += n as u64;
-        progress_fn(downloaded, total);
+    // WAV header
+    file.write_all(b"RIFF").map_err(|e| TranscriberError::WavWrite(e.to_string()))?;
+    file.write_all(&file_size.to_le_bytes()).map_err(|e| TranscriberError::WavWrite(e.to_string()))?;
+    file.write_all(b"WAVE").map_err(|e| TranscriberError::WavWrite(e.to_string()))?;
+
+    // fmt chunk
+    file.write_all(b"fmt ").map_err(|e| TranscriberError::WavWrite(e.to_string()))?;
+    file.write_all(&16u32.to_le_bytes()).map_err(|e| TranscriberError::WavWrite(e.to_string()))?;
+    file.write_all(&1u16.to_le_bytes()).map_err(|e| TranscriberError::WavWrite(e.to_string()))?; // PCM
+    file.write_all(&1u16.to_le_bytes()).map_err(|e| TranscriberError::WavWrite(e.to_string()))?; // mono
+    file.write_all(&sample_rate.to_le_bytes()).map_err(|e| TranscriberError::WavWrite(e.to_string()))?;
+    let byte_rate = sample_rate * bytes_per_sample as u32;
+    file.write_all(&byte_rate.to_le_bytes()).map_err(|e| TranscriberError::WavWrite(e.to_string()))?;
+    file.write_all(&bytes_per_sample.to_le_bytes()).map_err(|e| TranscriberError::WavWrite(e.to_string()))?;
+    file.write_all(&16u16.to_le_bytes()).map_err(|e| TranscriberError::WavWrite(e.to_string()))?; // bits per sample
+
+    // data chunk
+    file.write_all(b"data").map_err(|e| TranscriberError::WavWrite(e.to_string()))?;
+    file.write_all(&data_size.to_le_bytes()).map_err(|e| TranscriberError::WavWrite(e.to_string()))?;
+
+    // Convert f32 to i16 PCM
+    for &sample in samples {
+        let clamped = sample.max(-1.0).min(1.0);
+        let pcm = (clamped * 32767.0) as i16;
+        file.write_all(&pcm.to_le_bytes()).map_err(|e| TranscriberError::WavWrite(e.to_string()))?;
     }
 
-    file.flush()
-        .map_err(|e| TranscriberError::ModelDownload(e.to_string()))?;
-
+    file.flush().map_err(|e| TranscriberError::WavWrite(e.to_string()))?;
     Ok(())
 }
