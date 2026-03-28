@@ -267,24 +267,9 @@ pub fn run(restore_session: Option<crate::session::Session>) -> Result<(), Box<d
         while let Ok(event) = voice_rx.try_recv() {
             match event {
                 VoiceEvent::Transcribed(text) => {
-                    // Cancel any pending correction (fallback raw)
-                    if let CorrectionState::WaitingForResponse { raw_text, .. } = &correction_state {
-                        route_text(raw_text, &mut orchestrator, &mut workers);
-                    }
-                    // Start correction via orchestrator Claude
-                    // Skip if orchestrator is blocked on permission prompt
-                    let orch_blocked = ui::is_pane_blocked(&orchestrator.pane);
-                    if orchestrator.pane.status == PaneStatus::Running && !orch_blocked {
-                        let prompt = format_correction_prompt(&text);
-                        let _ = orchestrator.write_to_pty(format!("{}\n", prompt).as_bytes());
-                        correction_state = CorrectionState::WaitingForResponse {
-                            raw_text: text,
-                            hard_ceiling: Instant::now() + Duration::from_millis(correction_timeout_ms()),
-                        };
-                    } else {
-                        // Orchestrator not running — skip correction, route raw
-                        route_text(&text, &mut orchestrator, &mut workers);
-                    }
+                    // Extract last intent (handle corrections like "아니 바나나를 만들어")
+                    let final_text = extract_last_intent(&text);
+                    route_text(&final_text, &mut orchestrator, &mut workers);
                     voice_state = VoiceState::Idle;
                 }
                 VoiceEvent::StateChanged(state) => {
@@ -302,28 +287,6 @@ pub fn run(restore_session: Option<crate::session::Session>) -> Result<(), Box<d
         // 2c. Check voice recording timeout
         voice_mgr.check_timeout();
 
-        // 2d. Check correction state (quiescence or hard ceiling)
-        if let CorrectionState::WaitingForResponse { ref raw_text, hard_ceiling } = correction_state {
-            let quiescent = orchestrator.last_output_time
-                .map_or(false, |t| t.elapsed() > Duration::from_millis(correction_quiescence_ms()));
-            let ceiling_hit = Instant::now() >= hard_ceiling;
-
-            if quiescent || ceiling_hit {
-                // Extract corrected text: sentinels → heuristic → raw fallback
-                let corrected = orchestrator.pane.grid
-                    .extract_between_markers("[CDC_CORRECT]", "[/CDC_CORRECT]")
-                    .or_else(|| {
-                        // Heuristic: try to find a line in grid that differs from the prompt
-                        let all = orchestrator.pane.grid.extract_all_text();
-                        heuristic_extract_correction(&all, raw_text)
-                    })
-                    .unwrap_or_else(|| raw_text.clone());
-
-                route_text(&corrected, &mut orchestrator, &mut workers);
-                correction_state = CorrectionState::Idle;
-            }
-        }
-
         // 3. Draw
         {
             let worker_panes: Vec<&Pane> = workers.iter().map(|w| &w.pane).collect();
@@ -334,7 +297,7 @@ pub fn run(restore_session: Option<crate::session::Session>) -> Result<(), Box<d
             let dialog_ref = &dialog;
             let fc = frame_count;
             let vs = &voice_state;
-            let correcting = matches!(correction_state, CorrectionState::WaitingForResponse { .. });
+            let correcting = false;
             let sel_ref = &selection;
             terminal.draw(|frame| {
                 *rects_out = ui::render(frame, &orchestrator.pane, &worker_panes, &active_copy, fullscreen, fc, vs, correcting, sel_ref);
@@ -1352,6 +1315,28 @@ fn heuristic_extract_correction(grid_text: &str, raw_text: &str) -> Option<Strin
         return Some(trimmed.to_string());
     }
     None
+}
+
+/// Extract the last intent from STT text, handling corrections.
+/// e.g. "사과를 만들어 아니 바나나를 만들어" → "바나나를 만들어"
+fn extract_last_intent(text: &str) -> String {
+    // Korean correction words that indicate "forget what I just said"
+    let correction_markers = ["아니 ", "아니야 ", "아니요 ", "취소 ", "말고 ", "그게 아니라 ", "아 아니 "];
+    let lower = text.to_string();
+    let mut last_pos = 0;
+    for marker in &correction_markers {
+        if let Some(pos) = lower.rfind(marker) {
+            let after = pos + marker.len();
+            if after > last_pos {
+                last_pos = after;
+            }
+        }
+    }
+    if last_pos > 0 && last_pos < text.len() {
+        text[last_pos..].trim().to_string()
+    } else {
+        text.trim().to_string()
+    }
 }
 
 /// Route text to worker (if pattern matches) or orchestrator.
