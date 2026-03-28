@@ -221,6 +221,7 @@ pub fn run(restore_session: Option<crate::session::Session>) -> Result<(), Box<d
     let mut cwd_input: Option<String> = None; // Some = entering cwd for new worker
     let mut cwd_suggestions: Vec<String> = Vec::new();
     let mut cwd_suggestion_idx: usize = 0;
+    let mut cwd_original_input: String = String::new(); // preserve user's typed text
     let mut selection = TextSelection::none();
     let mut dialog = Dialog::None;
     let mut frame_count: u64 = 0;
@@ -321,7 +322,9 @@ pub fn run(restore_session: Option<crate::session::Session>) -> Result<(), Box<d
             terminal.draw(|frame| {
                 *rects_out = ui::render(frame, &orchestrator.pane, &worker_panes, &active_copy, fullscreen, fc, vs, correcting, sel_ref);
                 if let Some(input) = cwd_ref {
-                    ui::render_cwd_input(frame, input, sugg_ref, cwd_suggestion_idx);
+                    // selected_idx for UI: 0=original (no highlight), 1+=suggestion index
+                    let highlight_idx = if cwd_suggestion_idx == 0 { usize::MAX } else { cwd_suggestion_idx - 1 };
+                    ui::render_cwd_input(frame, input, sugg_ref, highlight_idx);
                 }
                 if *dialog_ref != Dialog::None {
                     ui::render_dialog(frame, dialog_ref);
@@ -452,7 +455,15 @@ pub fn run(restore_session: Option<crate::session::Session>) -> Result<(), Box<d
                                         } else {
                                             path.to_path_buf()
                                         };
-                                        Some(resolved.to_string_lossy().to_string())
+                                        let resolved_str = resolved.to_string_lossy().to_string();
+                                        if !resolved.is_dir() {
+                                            // Invalid path — show error briefly, don't close dialog
+                                            *input = format!("NOT A DIR: {}", resolved_str);
+                                            cwd_suggestions.clear();
+                                            cwd_suggestion_idx = 0;
+                                            continue;
+                                        }
+                                        Some(resolved_str)
                                     };
                                     cwd_input = None;
                                     cwd_suggestions.clear();
@@ -497,30 +508,41 @@ pub fn run(restore_session: Option<crate::session::Session>) -> Result<(), Box<d
                                 }
                                 KeyCode::Tab => {
                                     if !cwd_suggestions.is_empty() {
-                                        // Cycle to next suggestion
-                                        cwd_suggestion_idx = (cwd_suggestion_idx + 1) % cwd_suggestions.len();
-                                        *input = cwd_suggestions[cwd_suggestion_idx].clone();
+                                        // Cycle: original → suggestions[0] → suggestions[1] → ... → original
+                                        cwd_suggestion_idx += 1;
+                                        if cwd_suggestion_idx > cwd_suggestions.len() {
+                                            cwd_suggestion_idx = 0;
+                                        }
+                                        if cwd_suggestion_idx == 0 {
+                                            *input = cwd_original_input.clone();
+                                        } else {
+                                            *input = cwd_suggestions[cwd_suggestion_idx - 1].clone();
+                                        }
                                     } else {
-                                        // First Tab: generate suggestions
+                                        // First Tab: save original, generate suggestions
+                                        cwd_original_input = input.clone();
                                         let matches = smart_complete(input);
                                         if matches.len() == 1 {
                                             *input = matches[0].clone();
                                         } else if !matches.is_empty() {
-                                            cwd_suggestion_idx = 0;
+                                            cwd_suggestion_idx = 1; // point to first suggestion
                                             *input = matches[0].clone();
                                             cwd_suggestions = matches;
                                         }
                                     }
                                 }
                                 KeyCode::BackTab => {
-                                    // Shift+Tab: cycle backwards
                                     if !cwd_suggestions.is_empty() {
-                                        cwd_suggestion_idx = if cwd_suggestion_idx == 0 {
-                                            cwd_suggestions.len() - 1
+                                        if cwd_suggestion_idx == 0 {
+                                            cwd_suggestion_idx = cwd_suggestions.len();
                                         } else {
-                                            cwd_suggestion_idx - 1
-                                        };
-                                        *input = cwd_suggestions[cwd_suggestion_idx].clone();
+                                            cwd_suggestion_idx -= 1;
+                                        }
+                                        if cwd_suggestion_idx == 0 {
+                                            *input = cwd_original_input.clone();
+                                        } else {
+                                            *input = cwd_suggestions[cwd_suggestion_idx - 1].clone();
+                                        }
                                     }
                                 }
                                 KeyCode::Backspace => {
@@ -991,9 +1013,7 @@ fn smart_complete(input: &str) -> Vec<String> {
     // Also search current directory
     if let Ok(cwd) = std::env::current_dir() {
         let cwd_str = cwd.to_string_lossy().to_string();
-        if !cwd_str.starts_with(&home) || cwd_str == home {
-            search_dirs_segments(&cwd_str, &segments, 2, &home, &mut results);
-        }
+        search_dirs_segments(&cwd_str, &segments, 2, &home, &mut results);
     }
     results.sort();
     results.dedup();
@@ -1053,9 +1073,10 @@ fn search_dirs_segments(
                     results,
                 );
             }
+        } else {
+            // Only recurse if name didn't match — avoid double traversal
+            search_dirs_segments(&path_str, segments, depth - 1, home, results);
         }
-        // Also recurse with all segments (directory name didn't match first segment)
-        search_dirs_segments(&path_str, segments, depth - 1, home, results);
     }
 }
 
@@ -1229,24 +1250,6 @@ fn strip_particle(s: &str) -> &str {
     s.trim()
 }
 
-/// Find the longest common prefix among strings.
-fn common_prefix(strings: &[String]) -> String {
-    if strings.is_empty() {
-        return String::new();
-    }
-    let first = &strings[0];
-    let mut len = first.len();
-    for s in &strings[1..] {
-        len = len.min(s.len());
-        for (i, (a, b)) in first.bytes().zip(s.bytes()).enumerate() {
-            if a != b {
-                len = len.min(i);
-                break;
-            }
-        }
-    }
-    first[..len].to_string()
-}
 
 #[cfg(test)]
 mod tests {

@@ -160,9 +160,9 @@ pub fn render_cwd_input(frame: &mut Frame, input: &str, suggestions: &[String], 
     let area = frame.area();
     let width = 60u16.min(area.width.saturating_sub(4));
     let x = (area.width.saturating_sub(width)) / 2;
-    let y = area.height / 2;
     let sugg_lines = suggestions.len().min(8) as u16;
     let height = 3 + sugg_lines;
+    let y = (area.height / 2).min(area.height.saturating_sub(height));
     let rect = Rect::new(x, y, width, height);
 
     let mut lines = vec![
