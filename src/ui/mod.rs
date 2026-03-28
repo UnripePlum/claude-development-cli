@@ -158,8 +158,8 @@ pub fn render_cwd_input(frame: &mut Frame, input: &str, suggestions: &[String], 
     use ratatui::text::{Line, Span};
 
     let area = frame.area();
-    // Wide dialog: 80% of terminal width, min 40
-    let width = (area.width * 80 / 100).max(40).min(area.width.saturating_sub(2));
+    // Dialog width: ~78 chars (60 * 1.3), capped to terminal
+    let width = 78u16.min(area.width.saturating_sub(4));
     let x = (area.width.saturating_sub(width)) / 2;
     let max_visible = 12usize;
     let sugg_lines = suggestions.len().min(max_visible) as u16;
