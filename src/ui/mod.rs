@@ -218,6 +218,36 @@ pub fn render_cwd_input(frame: &mut Frame, input: &str, suggestions: &[String], 
     }
 }
 
+/// Render STT confirmation dialog with editable text.
+pub fn render_stt_confirm(frame: &mut Frame, text: &str, cursor: usize) {
+    let area = frame.area();
+    let width = 78u16.min(area.width.saturating_sub(4));
+    let height = 4u16;
+    let x = (area.width.saturating_sub(width)) / 2;
+    let y = (area.height / 3).min(area.height.saturating_sub(height));
+    let rect = Rect::new(x, y, width, height);
+
+    // Build text with cursor indicator
+    let before: String = text.chars().take(cursor).collect();
+    let after: String = text.chars().skip(cursor).collect();
+    let display = format!(" {}|{}", before, after);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Green))
+        .title("Voice Input — Edit and press Enter to send, Esc to cancel");
+    let paragraph = Paragraph::new(display).block(block);
+    frame.render_widget(Clear, rect);
+    frame.render_widget(paragraph, rect);
+
+    // Set hardware cursor
+    let cursor_x = rect.x + 1 + 1 + before.len() as u16;
+    let cursor_y = rect.y + 1;
+    if cursor_x < rect.x + rect.width && cursor_y < rect.y + rect.height {
+        frame.set_cursor_position(ratatui::layout::Position::new(cursor_x, cursor_y));
+    }
+}
+
 /// Render execution mode selection dialog (Claude vs Terminal).
 pub fn render_mode_select(frame: &mut Frame, selected: usize) {
     use ratatui::text::{Line, Span};

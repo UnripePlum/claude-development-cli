@@ -235,6 +235,8 @@ pub fn run(restore_session: Option<crate::session::Session>) -> Result<(), Box<d
     let mut cwd_suggestions: Vec<String> = Vec::new();
     let mut cwd_suggestion_idx: usize = 0;
     let mut cwd_original_input: String = String::new(); // preserve user's typed text
+    let mut stt_confirm: Option<String> = None; // Some = STT result awaiting confirmation
+    let mut stt_cursor: usize = 0; // cursor position in stt_confirm text
     let mut pending_worker_cwd: Option<Option<String>> = None; // Some = waiting for mode selection
     let mut mode_selection: usize = 0; // 0 = Claude, 1 = Terminal
     let mut perm_selection: usize = 0; // 0 = normal, 1 = skip-permissions
@@ -268,15 +270,10 @@ pub fn run(restore_session: Option<crate::session::Session>) -> Result<(), Box<d
         while let Ok(event) = voice_rx.try_recv() {
             match event {
                 VoiceEvent::Transcribed(text) => {
-                    // Extract last intent (handle corrections like "아니 바나나를 만들어")
                     let final_text = extract_last_intent(&text);
-                    // Check for CDC commands before routing
-                    let lower = final_text.to_lowercase();
-                    if lower.contains("새 페인") || lower.contains("세 페인") || lower.contains("페인 만들") || lower.contains("페인 추가") || lower.contains("페인 열") || lower.contains("new pane") {
-                        cwd_input = Some(String::new());
-                    } else {
-                        route_text(&final_text, &mut orchestrator, &mut workers);
-                    }
+                    // Show editable confirmation dialog
+                    stt_cursor = final_text.len();
+                    stt_confirm = Some(final_text);
                     voice_state = VoiceState::Idle;
                     voice_mgr.reset_to_idle();
                 }
@@ -310,7 +307,9 @@ pub fn run(restore_session: Option<crate::session::Session>) -> Result<(), Box<d
             let sel_ref = &selection;
             terminal.draw(|frame| {
                 *rects_out = ui::render(frame, &orchestrator.pane, &worker_panes, &active_copy, fullscreen, fc, vs, correcting, sel_ref);
-                if pending_worker_cwd.is_some() {
+                if let Some(ref stt_text) = stt_confirm {
+                    ui::render_stt_confirm(frame, stt_text, stt_cursor);
+                } else if pending_worker_cwd.is_some() {
                     if worker_mode_step == 0 {
                         ui::render_mode_select(frame, mode_selection);
                     } else {
@@ -455,6 +454,59 @@ pub fn run(restore_session: Option<crate::session::Session>) -> Result<(), Box<d
                                     }
                                 }
                                 Dialog::None => unreachable!(),
+                            }
+                        } else if let Some(ref mut stt_text) = stt_confirm {
+                            // STT confirmation dialog: edit and confirm
+                            match key.code {
+                                KeyCode::Enter => {
+                                    let final_text = stt_text.clone();
+                                    stt_confirm = None;
+                                    // Check for CDC commands
+                                    let lower = final_text.to_lowercase();
+                                    if lower.contains("새 페인") || lower.contains("세 페인") || lower.contains("페인 만들") || lower.contains("페인 추가") || lower.contains("페인 열") || lower.contains("new pane") {
+                                        cwd_input = Some(String::new());
+                                    } else {
+                                        route_text(&final_text, &mut orchestrator, &mut workers);
+                                    }
+                                }
+                                KeyCode::Esc => {
+                                    stt_confirm = None;
+                                }
+                                KeyCode::Backspace => {
+                                    if stt_cursor > 0 {
+                                        // Remove char before cursor
+                                        let byte_pos = stt_text.char_indices()
+                                            .nth(stt_cursor - 1)
+                                            .map(|(i, _)| i)
+                                            .unwrap_or(0);
+                                        let end_pos = stt_text.char_indices()
+                                            .nth(stt_cursor)
+                                            .map(|(i, _)| i)
+                                            .unwrap_or(stt_text.len());
+                                        stt_text.replace_range(byte_pos..end_pos, "");
+                                        stt_cursor -= 1;
+                                    }
+                                }
+                                KeyCode::Left => {
+                                    stt_cursor = stt_cursor.saturating_sub(1);
+                                }
+                                KeyCode::Right => {
+                                    let char_count = stt_text.chars().count();
+                                    if stt_cursor < char_count {
+                                        stt_cursor += 1;
+                                    }
+                                }
+                                KeyCode::Home => { stt_cursor = 0; }
+                                KeyCode::End => { stt_cursor = stt_text.chars().count(); }
+                                KeyCode::Char(c) => {
+                                    let byte_pos = stt_text.char_indices()
+                                        .nth(stt_cursor)
+                                        .map(|(i, _)| i)
+                                        .unwrap_or(stt_text.len());
+                                    stt_text.insert(byte_pos, c);
+                                    stt_cursor += 1;
+                                }
+                                _ => {}
                             }
                         } else if pending_worker_cwd.is_some() {
                             // Step 0: Claude vs Terminal, Step 1: Permission mode (Claude only)
