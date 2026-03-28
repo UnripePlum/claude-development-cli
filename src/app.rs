@@ -272,7 +272,7 @@ pub fn run(restore_session: Option<crate::session::Session>) -> Result<(), Box<d
                 VoiceEvent::Transcribed(text) => {
                     let final_text = extract_last_intent(&text);
                     // Show editable confirmation dialog
-                    stt_cursor = final_text.len();
+                    stt_cursor = final_text.chars().count();
                     stt_confirm = Some(final_text);
                     voice_state = VoiceState::Idle;
                     voice_mgr.reset_to_idle();
