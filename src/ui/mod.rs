@@ -326,8 +326,8 @@ fn voice_title(base: &str, voice_state: &VoiceState, correcting: bool) -> String
         return format!("{} [CORRECTING...]", base);
     }
     match voice_state {
-        VoiceState::Idle => base.to_string(),
-        VoiceState::Recording => format!("{} [REC]", base),
+        VoiceState::Idle => format!("{} — Ctrl+R: voice", base),
+        VoiceState::Recording => format!("{} [REC] Ctrl+R: stop", base),
         VoiceState::Downloading(dl, total) => {
             let pct = if *total > 0 { dl * 100 / total } else { 0 };
             format!("{} [DL: {}%]", base, pct)
