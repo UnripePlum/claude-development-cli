@@ -1338,8 +1338,26 @@ fn heuristic_extract_correction(grid_text: &str, raw_text: &str) -> Option<Strin
 fn extract_last_intent(text: &str) -> String {
     // Korean correction words that indicate "forget what I just said"
     let correction_markers = [
+        // 직접 부정
         "아니다 ", "아니다. ", "아닌데 ", "아니 ", "아니야 ", "아니요 ",
-        "취소 ", "말고 ", "그게 아니라 ", "아 아니 ", "아 아니다 ",
+        "아니거든 ", "아니라 ", "아니고 ",
+        // 망설임 + 정정
+        "아 아니 ", "아 아니다 ", "아 아니야 ", "어 아니 ", "에 아니 ",
+        "잠깐 ", "잠깐만 ",
+        // 취소/변경
+        "취소 ", "취소하고 ", "취소해 ",
+        "말고 ", "말고요 ",
+        "그게 아니라 ", "그거 아니라 ", "그거 말고 ",
+        // 다시/변경 요청
+        "다시 ", "다시 말하면 ", "다시 말할게 ",
+        "수정 ", "수정해서 ", "바꿔서 ", "바꿔 ",
+        "아까 거 말고 ", "아까거 말고 ",
+        // 정정 표현
+        "아 그러니까 ", "그러니까 ", "아니 그러니까 ",
+        "아 맞다 ", "맞다 ",
+        "아 아닌데 ", "아 그게 아니고 ", "그게 아니고 ",
+        // 영어
+        "no ", "no no ", "cancel ", "not that ", "i mean ",
     ];
     let lower = text.to_string();
     let mut last_pos = 0;
