@@ -41,6 +41,11 @@ fi
 
 echo "==> [pre-commit] All ${PASSED:-0} tests passed."
 
+# --- Step 2b: release build ---
+echo "==> [pre-commit] Building release..."
+cargo build --release 2>&1
+echo "==> [pre-commit] Release build complete."
+
 # --- Step 3: Update Notion (best-effort, non-blocking) ---
 if [ -z "${NOTION_TOKEN:-}" ]; then
     echo "==> [pre-commit] NOTION_TOKEN not set, skipping Notion update."
