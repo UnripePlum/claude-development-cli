@@ -158,37 +158,45 @@ pub fn render_cwd_input(frame: &mut Frame, input: &str, suggestions: &[String], 
     use ratatui::text::{Line, Span};
 
     let area = frame.area();
-    let width = 60u16.min(area.width.saturating_sub(4));
+    // Wide dialog: 80% of terminal width, min 40
+    let width = (area.width * 80 / 100).max(40).min(area.width.saturating_sub(2));
     let x = (area.width.saturating_sub(width)) / 2;
-    let sugg_lines = suggestions.len().min(8) as u16;
+    let max_visible = 12usize;
+    let sugg_lines = suggestions.len().min(max_visible) as u16;
     let height = 3 + sugg_lines;
-    let y = (area.height / 2).min(area.height.saturating_sub(height));
+    let y = (area.height / 3).min(area.height.saturating_sub(height));
     let rect = Rect::new(x, y, width, height);
 
     let mut lines = vec![
-        Line::from(format!("cwd (Tab=cycle, Enter=confirm): {}_", input)),
+        Line::from(format!(" {}_", input)),
     ];
-    for (i, s) in suggestions.iter().enumerate().take(8) {
-        if i == selected_idx {
-            lines.push(Line::from(Span::styled(
-                format!(" > {}", s),
-                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
-            )));
+    for (i, s) in suggestions.iter().enumerate().take(max_visible) {
+        let selected = i == selected_idx;
+        let prefix = if selected { " > " } else { "   " };
+        let style = if selected {
+            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
         } else {
-            lines.push(Line::from(Span::styled(
-                format!("   {}", s),
-                Style::default().fg(Color::Gray),
-            )));
-        }
+            Style::default().fg(Color::White)
+        };
+        lines.push(Line::from(Span::styled(format!("{}{}", prefix, s), style)));
     }
 
+    let title = format!("New Worker — {} match{}", suggestions.len(),
+        if suggestions.len() == 1 { "" } else { "es" });
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Yellow))
-        .title("New Worker");
+        .border_style(Style::default().fg(Color::Cyan))
+        .title(title);
     let paragraph = Paragraph::new(lines).block(block);
     frame.render_widget(Clear, rect);
     frame.render_widget(paragraph, rect);
+
+    // Set hardware cursor at input position
+    let cursor_x = rect.x + 1 + 1 + input.len() as u16; // border + space + text
+    let cursor_y = rect.y + 1;
+    if cursor_x < rect.x + rect.width && cursor_y < rect.y + rect.height {
+        frame.set_cursor_position(ratatui::layout::Position::new(cursor_x, cursor_y));
+    }
 }
 
 /// Set the hardware cursor position for IME composition.
