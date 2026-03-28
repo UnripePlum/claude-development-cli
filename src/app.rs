@@ -506,32 +506,29 @@ pub fn run(restore_session: Option<crate::session::Session>) -> Result<(), Box<d
                                     cwd_suggestions.clear();
                                     cwd_suggestion_idx = 0;
                                 }
-                                KeyCode::Tab => {
+                                KeyCode::Tab | KeyCode::Down => {
                                     if !cwd_suggestions.is_empty() {
-                                        // Cycle: original → suggestions[0] → suggestions[1] → ... → original
                                         cwd_suggestion_idx += 1;
                                         if cwd_suggestion_idx > cwd_suggestions.len() {
                                             cwd_suggestion_idx = 0;
                                         }
-                                        if cwd_suggestion_idx == 0 {
-                                            *input = cwd_original_input.clone();
-                                        } else {
-                                            *input = cwd_suggestions[cwd_suggestion_idx - 1].clone();
-                                        }
                                     } else {
-                                        // First Tab: save original, generate suggestions
+                                        // Generate suggestions on first navigation
                                         cwd_original_input = input.clone();
                                         let matches = smart_complete(input);
-                                        if matches.len() == 1 {
-                                            *input = matches[0].clone();
-                                        } else if !matches.is_empty() {
-                                            cwd_suggestion_idx = 1; // point to first suggestion
-                                            *input = matches[0].clone();
+                                        if !matches.is_empty() {
                                             cwd_suggestions = matches;
+                                            cwd_suggestion_idx = 1;
                                         }
                                     }
+                                    // Update input to match selection
+                                    if cwd_suggestion_idx == 0 {
+                                        *input = cwd_original_input.clone();
+                                    } else if let Some(s) = cwd_suggestions.get(cwd_suggestion_idx - 1) {
+                                        *input = s.clone();
+                                    }
                                 }
-                                KeyCode::BackTab => {
+                                KeyCode::BackTab | KeyCode::Up => {
                                     if !cwd_suggestions.is_empty() {
                                         if cwd_suggestion_idx == 0 {
                                             cwd_suggestion_idx = cwd_suggestions.len();
@@ -540,8 +537,8 @@ pub fn run(restore_session: Option<crate::session::Session>) -> Result<(), Box<d
                                         }
                                         if cwd_suggestion_idx == 0 {
                                             *input = cwd_original_input.clone();
-                                        } else {
-                                            *input = cwd_suggestions[cwd_suggestion_idx - 1].clone();
+                                        } else if let Some(s) = cwd_suggestions.get(cwd_suggestion_idx - 1) {
+                                            *input = s.clone();
                                         }
                                     }
                                 }
