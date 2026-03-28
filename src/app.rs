@@ -712,6 +712,23 @@ pub fn run(restore_session: Option<crate::session::Session>) -> Result<(), Box<d
                     Event::Mouse(mouse) => {
                         match mouse.kind {
                             MouseEventKind::Down(MouseButton::Left) => {
+                                // Check [X] close button on worker panes (top-right corner)
+                                let mut close_clicked = false;
+                                for (ap, rect) in &pane_rects {
+                                    if let ActivePane::Worker(idx) = ap {
+                                        if rect.width > 10 {
+                                            let x_btn = rect.x + rect.width - 4;
+                                            let y_btn = rect.y;
+                                            if mouse.row == y_btn && mouse.column >= x_btn && mouse.column < x_btn + 3 {
+                                                dialog = Dialog::ConfirmCloseWorker(*idx);
+                                                close_clicked = true;
+                                                break;
+                                            }
+                                        }
+                                    }
+                                }
+                                if close_clicked { continue; }
+
                                 // Record click start — find which pane
                                 selection = TextSelection::none();
                                 for (ap, rect) in &pane_rects {

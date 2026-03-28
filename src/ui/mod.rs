@@ -94,7 +94,7 @@ pub fn render(
             ActivePane::Orchestrator => {
                 let title = voice_title("Orchestrator [fullscreen]", voice_state, correcting);
                 let sel = if selection.active && selection.pane == ActivePane::Orchestrator { Some(selection) } else { None };
-                render_pane(frame, orchestrator, area, true, &title, frame_count, sel);
+                render_pane(frame, orchestrator, area, true, &title, frame_count, sel, false);
                 set_cursor_for_ime(frame, orchestrator, area);
             }
             ActivePane::Worker(idx) => {
@@ -108,6 +108,7 @@ pub fn render(
                         &format!("Worker {} [fullscreen]", idx + 1),
                         frame_count,
                         sel,
+                        true,
                     );
                     set_cursor_for_ime(frame, pane, area);
                 }
@@ -124,7 +125,7 @@ pub fn render(
         let rect = layout.worker_rects[i];
         let focused = *active == ActivePane::Worker(i);
         let sel = if selection.active && selection.pane == ActivePane::Worker(i) { Some(selection) } else { None };
-        render_pane(frame, pane, rect, focused, &format!("Worker {}", i + 1), frame_count, sel);
+        render_pane(frame, pane, rect, focused, &format!("Worker {}", i + 1), frame_count, sel, true);
         rects.push((ActivePane::Worker(i), rect));
     }
 
@@ -139,6 +140,7 @@ pub fn render(
         &orch_title,
         frame_count,
         orch_sel,
+        false,
     );
     rects.push((ActivePane::Orchestrator, layout.orch_rect));
 
@@ -317,7 +319,7 @@ enum PaneAlert {
     ReceivingPrompt, // for SendToWorker yellow blink
 }
 
-fn render_pane(frame: &mut Frame, pane: &Pane, area: Rect, focused: bool, title: &str, frame_count: u64, selection: Option<&TextSelection>) {
+fn render_pane(frame: &mut Frame, pane: &Pane, area: Rect, focused: bool, title: &str, frame_count: u64, selection: Option<&TextSelection>, is_worker: bool) {
     let alert = detect_pane_alert(pane);
     let blink_on = (frame_count / 15) % 2 == 0; // ~0.5s blink at 60fps
 
@@ -356,6 +358,23 @@ fn render_pane(frame: &mut Frame, pane: &Pane, area: Rect, focused: bool, title:
     let inner = block.inner(area);
     frame.render_widget(block, area);
     frame.render_widget(PaneWidget::new(&pane.grid, focused, selection), inner);
+
+    // Render [X] close button on top-right for worker panes
+    if is_worker && area.width > 10 {
+        let x_pos = area.x + area.width - 4;
+        let y_pos = area.y;
+        let buf = frame.buffer_mut();
+        let close_style = Style::default().fg(Color::Red).add_modifier(Modifier::BOLD);
+        if let Some(cell) = buf.cell_mut(ratatui::layout::Position::new(x_pos, y_pos)) {
+            cell.set_char('['); cell.set_style(close_style);
+        }
+        if let Some(cell) = buf.cell_mut(ratatui::layout::Position::new(x_pos + 1, y_pos)) {
+            cell.set_char('X'); cell.set_style(close_style);
+        }
+        if let Some(cell) = buf.cell_mut(ratatui::layout::Position::new(x_pos + 2, y_pos)) {
+            cell.set_char(']'); cell.set_style(close_style);
+        }
+    }
 }
 
 /// Render a confirmation/input dialog overlay.
