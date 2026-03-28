@@ -525,12 +525,12 @@ pub fn run(restore_session: Option<crate::session::Session>) -> Result<(), Box<d
                                 }
                                 KeyCode::Backspace => {
                                     input.pop();
-                                    cwd_suggestions.clear();
+                                    cwd_suggestions = smart_complete(input);
                                     cwd_suggestion_idx = 0;
                                 }
                                 KeyCode::Char(c) => {
                                     input.push(c);
-                                    cwd_suggestions.clear();
+                                    cwd_suggestions = smart_complete(input);
                                     cwd_suggestion_idx = 0;
                                 }
                                 _ => {}
