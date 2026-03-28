@@ -418,35 +418,75 @@ fn render_pane(frame: &mut Frame, pane: &Pane, area: Rect, focused: bool, title:
 }
 
 /// Render a confirmation/input dialog overlay.
-pub fn render_dialog(frame: &mut Frame, dialog: &Dialog) {
+pub fn render_dialog(frame: &mut Frame, dialog: &Dialog, selected: usize) {
+    use ratatui::text::{Line, Span};
+
     let area = frame.area();
     let width = 50u16.min(area.width.saturating_sub(4));
     let x = (area.width.saturating_sub(width)) / 2;
 
     match dialog {
         Dialog::ConfirmQuit => {
-            let height = 5u16;
+            let height = 6u16;
             let y = (area.height.saturating_sub(height)) / 2;
             let rect = Rect::new(x, y, width, height);
             let block = Block::default()
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(Color::Red))
                 .title("Quit CDC?");
-            let text = "All workers will be terminated.\n\n  [Y] Quit   [N] Cancel";
-            let p = Paragraph::new(text).block(block);
+            let yes_style = if selected == 0 {
+                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::White)
+            };
+            let no_style = if selected == 1 {
+                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::White)
+            };
+            let lines = vec![
+                Line::from("All workers will be terminated."),
+                Line::from(""),
+                Line::from(vec![
+                    Span::raw("  "),
+                    Span::styled(if selected == 0 { "> [Quit]" } else { "  [Quit]" }, yes_style),
+                    Span::raw("   "),
+                    Span::styled(if selected == 1 { "> [Cancel]" } else { "  [Cancel]" }, no_style),
+                ]),
+            ];
+            let p = Paragraph::new(lines).block(block);
             frame.render_widget(Clear, rect);
             frame.render_widget(p, rect);
         }
         Dialog::ConfirmCloseWorker(idx) => {
-            let height = 5u16;
+            let height = 6u16;
             let y = (area.height.saturating_sub(height)) / 2;
             let rect = Rect::new(x, y, width, height);
             let block = Block::default()
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(Color::Yellow))
                 .title(format!("Close Worker {}?", idx + 1));
-            let text = "Worker process will be killed.\n\n  [Y] Close   [N] Cancel";
-            let p = Paragraph::new(text).block(block);
+            let yes_style = if selected == 0 {
+                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::White)
+            };
+            let no_style = if selected == 1 {
+                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::White)
+            };
+            let lines = vec![
+                Line::from("Worker process will be killed."),
+                Line::from(""),
+                Line::from(vec![
+                    Span::raw("  "),
+                    Span::styled(if selected == 0 { "> [Close]" } else { "  [Close]" }, yes_style),
+                    Span::raw("   "),
+                    Span::styled(if selected == 1 { "> [Cancel]" } else { "  [Cancel]" }, no_style),
+                ]),
+            ];
+            let p = Paragraph::new(lines).block(block);
             frame.render_widget(Clear, rect);
             frame.render_widget(p, rect);
         }

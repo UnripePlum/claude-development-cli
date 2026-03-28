@@ -240,6 +240,7 @@ pub fn run(restore_session: Option<crate::session::Session>) -> Result<(), Box<d
     let mut worker_mode_step: u8 = 0;  // 0 = mode select, 1 = perm select (Claude only)
     let mut selection = TextSelection::none();
     let mut dialog = Dialog::None;
+    let mut dialog_selection: usize = 0; // 0 = Yes/Confirm, 1 = Cancel
     let mut frame_count: u64 = 0;
     let mut _loop_start = Instant::now();
 
@@ -348,7 +349,7 @@ pub fn run(restore_session: Option<crate::session::Session>) -> Result<(), Box<d
                     ui::render_cwd_input(frame, input, sugg_ref, highlight_idx);
                 }
                 if *dialog_ref != Dialog::None {
-                    ui::render_dialog(frame, dialog_ref);
+                    ui::render_dialog(frame, dialog_ref, dialog_selection);
                 }
             })?;
         }
@@ -373,6 +374,17 @@ pub fn run(restore_session: Option<crate::session::Session>) -> Result<(), Box<d
                                     }
                                     KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
                                         dialog = Dialog::None;
+                                    }
+                                    KeyCode::Up | KeyCode::Down | KeyCode::Tab => {
+                                        dialog_selection = 1 - dialog_selection;
+                                    }
+                                    KeyCode::Enter => {
+                                        if dialog_selection == 0 {
+                                            should_quit = true;
+                                            break;
+                                        } else {
+                                            dialog = Dialog::None;
+                                        }
                                     }
                                     _ => {}
                                 },
@@ -402,6 +414,29 @@ pub fn run(restore_session: Option<crate::session::Session>) -> Result<(), Box<d
                                         }
                                         KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
                                             dialog = Dialog::None;
+                                        }
+                                        KeyCode::Up | KeyCode::Down | KeyCode::Tab => {
+                                            dialog_selection = 1 - dialog_selection;
+                                        }
+                                        KeyCode::Enter => {
+                                            if dialog_selection == 0 {
+                                                if idx < workers.len() {
+                                                    let mut removed = workers.remove(idx);
+                                                    let _ = removed.pty.kill();
+                                                    let new = if workers.is_empty() {
+                                                        ActivePane::Orchestrator
+                                                    } else {
+                                                        ActivePane::Worker(idx.min(workers.len() - 1))
+                                                    };
+                                                    switch_focus(active, new, &mut orchestrator, &mut workers);
+                                                    active = new;
+                                                    fullscreen = None;
+                                                    resize_all_panes(&mut orchestrator, &mut workers, term_rect(&terminal), None);
+                                                }
+                                                dialog = Dialog::None;
+                                            } else {
+                                                dialog = Dialog::None;
+                                            }
                                         }
                                         _ => {}
                                     }
@@ -647,6 +682,7 @@ pub fn run(restore_session: Option<crate::session::Session>) -> Result<(), Box<d
                             match key.code {
                                 KeyCode::Char('q') => {
                                     dialog = Dialog::ConfirmQuit;
+                                    dialog_selection = 0;
                                 }
                                 KeyCode::Char('z') => {
                                     // Toggle fullscreen
@@ -681,6 +717,7 @@ pub fn run(restore_session: Option<crate::session::Session>) -> Result<(), Box<d
                                     if let ActivePane::Worker(idx) = active {
                                         if idx < workers.len() {
                                             dialog = Dialog::ConfirmCloseWorker(idx);
+                                            dialog_selection = 0;
                                         }
                                     }
                                 }
@@ -767,6 +804,48 @@ pub fn run(restore_session: Option<crate::session::Session>) -> Result<(), Box<d
                     Event::Mouse(mouse) => {
                         match mouse.kind {
                             MouseEventKind::Down(MouseButton::Left) => {
+                                // Check dialog button clicks
+                                if dialog != Dialog::None {
+                                    let area = terminal.size().unwrap_or_default();
+                                    let dw = 50u16.min(area.width.saturating_sub(4));
+                                    let dh = 6u16;
+                                    let dx = (area.width.saturating_sub(dw)) / 2;
+                                    let dy = (area.height.saturating_sub(dh)) / 2;
+                                    let btn_y = dy + 4; // button row (border + 3 content lines)
+                                    if mouse.row == btn_y {
+                                        let yes_start = dx + 3;
+                                        let yes_end = yes_start + 8;
+                                        let no_start = yes_end + 3;
+                                        let no_end = no_start + 10;
+                                        if mouse.column >= yes_start && mouse.column < yes_end {
+                                            dialog_selection = 0;
+                                            // Simulate Enter
+                                            match &dialog {
+                                                Dialog::ConfirmQuit => { should_quit = true; break; }
+                                                Dialog::ConfirmCloseWorker(idx) => {
+                                                    let idx = *idx;
+                                                    if idx < workers.len() {
+                                                        let mut removed = workers.remove(idx);
+                                                        let _ = removed.pty.kill();
+                                                        let new = if workers.is_empty() { ActivePane::Orchestrator } else { ActivePane::Worker(idx.min(workers.len() - 1)) };
+                                                        switch_focus(active, new, &mut orchestrator, &mut workers);
+                                                        active = new;
+                                                        fullscreen = None;
+                                                        resize_all_panes(&mut orchestrator, &mut workers, term_rect(&terminal), None);
+                                                    }
+                                                    dialog = Dialog::None;
+                                                }
+                                                _ => {}
+                                            }
+                                            continue;
+                                        } else if mouse.column >= no_start && mouse.column < no_end {
+                                            dialog = Dialog::None;
+                                            continue;
+                                        }
+                                    }
+                                    continue; // absorb click when dialog is open
+                                }
+
                                 // Check [X] close button on worker panes (top-right corner)
                                 let mut close_clicked = false;
                                 for (ap, rect) in &pane_rects {
@@ -776,6 +855,7 @@ pub fn run(restore_session: Option<crate::session::Session>) -> Result<(), Box<d
                                             let y_btn = rect.y;
                                             if mouse.row == y_btn && mouse.column >= x_btn && mouse.column < x_btn + 3 {
                                                 dialog = Dialog::ConfirmCloseWorker(*idx);
+                                                dialog_selection = 0;
                                                 close_clicked = true;
                                                 break;
                                             }
