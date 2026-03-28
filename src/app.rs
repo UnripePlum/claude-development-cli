@@ -496,7 +496,7 @@ pub fn run(restore_session: Option<crate::session::Session>) -> Result<(), Box<d
                                     } else {
                                         // Permission step → spawn Claude worker
                                         let cwd = pending_worker_cwd.take().unwrap();
-                                        let skip_perms = perm_selection == 1;
+                                        let skip_perms = perm_selection == 0;
                                         let new_count = workers.len() + 1;
                                         let layout = ui::compute_layout(term_rect(&terminal), new_count);
                                         if let Some(rect) = layout.worker_rects.last() {

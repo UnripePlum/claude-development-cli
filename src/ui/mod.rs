@@ -259,8 +259,8 @@ pub fn render_perm_select(frame: &mut Frame, selected: usize) {
     let rect = Rect::new(x, y, width, height);
 
     let options = [
-        ("Normal", "Requires permission for each action"),
         ("Skip Permissions", "--dangerously-skip-permissions"),
+        ("Normal", "Requires permission for each action"),
     ];
 
     let mut lines = Vec::new();
