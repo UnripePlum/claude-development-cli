@@ -272,7 +272,7 @@ pub fn run(restore_session: Option<crate::session::Session>) -> Result<(), Box<d
                     let final_text = extract_last_intent(&text);
                     // Check for CDC commands before routing
                     let lower = final_text.to_lowercase();
-                    if lower.contains("새 페인") || lower.contains("페인 만들") || lower.contains("new pane") {
+                    if lower.contains("새 페인") || lower.contains("세 페인") || lower.contains("페인 만들") || lower.contains("페인 추가") || lower.contains("페인 열") || lower.contains("new pane") {
                         cwd_input = Some(String::new());
                     } else {
                         route_text(&final_text, &mut orchestrator, &mut workers);
