@@ -234,8 +234,10 @@ pub fn run(restore_session: Option<crate::session::Session>) -> Result<(), Box<d
     let mut cwd_suggestions: Vec<String> = Vec::new();
     let mut cwd_suggestion_idx: usize = 0;
     let mut cwd_original_input: String = String::new(); // preserve user's typed text
-    let mut pending_worker_cwd: Option<Option<String>> = None; // Some = waiting for permission mode selection
+    let mut pending_worker_cwd: Option<Option<String>> = None; // Some = waiting for mode selection
+    let mut mode_selection: usize = 0; // 0 = Claude, 1 = Terminal
     let mut perm_selection: usize = 0; // 0 = normal, 1 = skip-permissions
+    let mut worker_mode_step: u8 = 0;  // 0 = mode select, 1 = perm select (Claude only)
     let mut selection = TextSelection::none();
     let mut dialog = Dialog::None;
     let mut frame_count: u64 = 0;
@@ -336,7 +338,11 @@ pub fn run(restore_session: Option<crate::session::Session>) -> Result<(), Box<d
             terminal.draw(|frame| {
                 *rects_out = ui::render(frame, &orchestrator.pane, &worker_panes, &active_copy, fullscreen, fc, vs, correcting, sel_ref);
                 if pending_worker_cwd.is_some() {
-                    ui::render_perm_select(frame, perm_selection);
+                    if worker_mode_step == 0 {
+                        ui::render_mode_select(frame, mode_selection);
+                    } else {
+                        ui::render_perm_select(frame, perm_selection);
+                    }
                 } else if let Some(input) = cwd_ref {
                     let highlight_idx = if cwd_suggestion_idx == 0 { usize::MAX } else { cwd_suggestion_idx - 1 };
                     ui::render_cwd_input(frame, input, sugg_ref, highlight_idx);
@@ -444,46 +450,93 @@ pub fn run(restore_session: Option<crate::session::Session>) -> Result<(), Box<d
                                 Dialog::None => unreachable!(),
                             }
                         } else if pending_worker_cwd.is_some() {
-                            // Permission mode selection
+                            // Step 0: Claude vs Terminal, Step 1: Permission mode (Claude only)
                             match key.code {
                                 KeyCode::Up | KeyCode::Down | KeyCode::Tab => {
-                                    perm_selection = 1 - perm_selection; // toggle 0/1
+                                    if worker_mode_step == 0 {
+                                        mode_selection = 1 - mode_selection;
+                                    } else {
+                                        perm_selection = 1 - perm_selection;
+                                    }
                                 }
                                 KeyCode::Enter => {
-                                    let cwd = pending_worker_cwd.take().unwrap();
-                                    let skip_perms = perm_selection == 1;
-                                    let new_count = workers.len() + 1;
-                                    let layout = ui::compute_layout(term_rect(&terminal), new_count);
-                                    if let Some(rect) = layout.worker_rects.last() {
-                                        let wi = ui::inner_rect(*rect);
-                                        let args: &[&str] = if skip_perms {
-                                            &["--dangerously-skip-permissions"]
+                                    if worker_mode_step == 0 {
+                                        if mode_selection == 0 {
+                                            // Claude selected → go to permission step
+                                            worker_mode_step = 1;
+                                            perm_selection = 0;
                                         } else {
-                                            &[]
-                                        };
-                                        if let Ok(mp) = ManagedPane::spawn_with_args(
-                                            next_id,
-                                            format!("worker-{}", next_id),
-                                            &cmd,
-                                            args,
-                                            wi.width,
-                                            wi.height,
-                                            cwd.as_deref(),
-                                        ) {
-                                            workers.push(mp);
-                                            let new_ap = ActivePane::Worker(workers.len() - 1);
-                                            switch_focus(active, new_ap, &mut orchestrator, &mut workers);
-                                            active = new_ap;
-                                            next_id += 1;
-                                            fullscreen = None;
-                                            resize_all_panes(&mut orchestrator, &mut workers, term_rect(&terminal), None);
+                                            // Terminal selected → spawn shell directly
+                                            let cwd = pending_worker_cwd.take().unwrap();
+                                            let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
+                                            let new_count = workers.len() + 1;
+                                            let layout = ui::compute_layout(term_rect(&terminal), new_count);
+                                            if let Some(rect) = layout.worker_rects.last() {
+                                                let wi = ui::inner_rect(*rect);
+                                                if let Ok(mp) = ManagedPane::spawn(
+                                                    next_id,
+                                                    format!("term-{}", next_id),
+                                                    &shell,
+                                                    wi.width,
+                                                    wi.height,
+                                                    cwd.as_deref(),
+                                                ) {
+                                                    workers.push(mp);
+                                                    let new_ap = ActivePane::Worker(workers.len() - 1);
+                                                    switch_focus(active, new_ap, &mut orchestrator, &mut workers);
+                                                    active = new_ap;
+                                                    next_id += 1;
+                                                    fullscreen = None;
+                                                    resize_all_panes(&mut orchestrator, &mut workers, term_rect(&terminal), None);
+                                                }
+                                            }
+                                            mode_selection = 0;
+                                            worker_mode_step = 0;
                                         }
+                                    } else {
+                                        // Permission step → spawn Claude worker
+                                        let cwd = pending_worker_cwd.take().unwrap();
+                                        let skip_perms = perm_selection == 1;
+                                        let new_count = workers.len() + 1;
+                                        let layout = ui::compute_layout(term_rect(&terminal), new_count);
+                                        if let Some(rect) = layout.worker_rects.last() {
+                                            let wi = ui::inner_rect(*rect);
+                                            let args: &[&str] = if skip_perms {
+                                                &["--dangerously-skip-permissions"]
+                                            } else {
+                                                &[]
+                                            };
+                                            if let Ok(mp) = ManagedPane::spawn_with_args(
+                                                next_id,
+                                                format!("worker-{}", next_id),
+                                                &cmd,
+                                                args,
+                                                wi.width,
+                                                wi.height,
+                                                cwd.as_deref(),
+                                            ) {
+                                                workers.push(mp);
+                                                let new_ap = ActivePane::Worker(workers.len() - 1);
+                                                switch_focus(active, new_ap, &mut orchestrator, &mut workers);
+                                                active = new_ap;
+                                                next_id += 1;
+                                                fullscreen = None;
+                                                resize_all_panes(&mut orchestrator, &mut workers, term_rect(&terminal), None);
+                                            }
+                                        }
+                                        perm_selection = 0;
+                                        mode_selection = 0;
+                                        worker_mode_step = 0;
                                     }
-                                    perm_selection = 0;
                                 }
                                 KeyCode::Esc => {
-                                    pending_worker_cwd = None;
-                                    perm_selection = 0;
+                                    if worker_mode_step == 1 {
+                                        worker_mode_step = 0; // back to mode selection
+                                    } else {
+                                        pending_worker_cwd = None;
+                                        mode_selection = 0;
+                                        worker_mode_step = 0;
+                                    }
                                 }
                                 _ => {}
                             }
@@ -527,9 +580,11 @@ pub fn run(restore_session: Option<crate::session::Session>) -> Result<(), Box<d
                                     cwd_input = None;
                                     cwd_suggestions.clear();
                                     cwd_suggestion_idx = 0;
-                                    // Transition to permission mode selection
+                                    // Transition to mode selection (Claude vs Terminal)
                                     pending_worker_cwd = Some(cwd);
+                                    mode_selection = 0;
                                     perm_selection = 0;
+                                    worker_mode_step = 0;
                                 }
                                 KeyCode::Esc => {
                                     cwd_input = None;

@@ -207,6 +207,46 @@ pub fn render_cwd_input(frame: &mut Frame, input: &str, suggestions: &[String], 
     }
 }
 
+/// Render execution mode selection dialog (Claude vs Terminal).
+pub fn render_mode_select(frame: &mut Frame, selected: usize) {
+    use ratatui::text::{Line, Span};
+
+    let area = frame.area();
+    let width = 50u16.min(area.width.saturating_sub(4));
+    let height = 6u16;
+    let x = (area.width.saturating_sub(width)) / 2;
+    let y = (area.height / 3).min(area.height.saturating_sub(height));
+    let rect = Rect::new(x, y, width, height);
+
+    let options = [
+        ("Claude Code", "AI-powered coding assistant"),
+        ("Terminal", "Plain shell (zsh/bash)"),
+    ];
+
+    let mut lines = Vec::new();
+    for (i, (label, desc)) in options.iter().enumerate() {
+        let prefix = if i == selected { " > " } else { "   " };
+        let style = if i == selected {
+            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::White)
+        };
+        lines.push(Line::from(Span::styled(format!("{}{}", prefix, label), style)));
+        lines.push(Line::from(Span::styled(
+            format!("     {}", desc),
+            Style::default().fg(Color::DarkGray),
+        )));
+    }
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan))
+        .title("Worker Type — ↑↓ select, Enter confirm, Esc cancel");
+    let paragraph = Paragraph::new(lines).block(block);
+    frame.render_widget(Clear, rect);
+    frame.render_widget(paragraph, rect);
+}
+
 /// Render permission mode selection dialog.
 pub fn render_perm_select(frame: &mut Frame, selected: usize) {
     use ratatui::text::{Line, Span};
